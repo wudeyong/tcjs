@@ -1,0 +1,532 @@
+define(function(require, exports, module) {
+    var $ = require("cdn/$");
+    var _ = require("cdn/lib/underscore");
+    var Bee = require('qccomponent');
+    var tmpl = require("cdn/lib/tmpl");
+    var dao = require('cdn/data/dao');
+    var util = require('cdn/util');
+    var cdnutil = require('cdn/lib/util');
+    var router = require("cdn/router");
+    var tips = require('cdn/tips');
+    var dropdown = require('cdn/dropdown');
+    var dialog = require('cdn/dialog');
+    var accessTemplate = require("../../templates/access_oversea.html.js");
+
+    var $accessTemplate = $(accessTemplate);
+    var closeTmpl = $accessTemplate.filter("#close").html();
+    var modifyPprojectTmpl = $accessTemplate.filter("#modify_project").html();
+    var deleteTmpl = $accessTemplate.filter("#delete").html();
+    var startCdnTmpl = $accessTemplate.filter("#start").html();
+    
+    var _defaultErrMsg = '服务器繁忙，请稍后再试';
+    var domainTable;
+    var hostData = [];
+    var projectList;
+
+    var headOptions = {
+        status: null,
+        origin: null,
+        type: null
+    };
+
+    var initPage = function() {
+        // 初始化类型列表
+        new dropdown($('[_dn_cdn_operation]'), {
+            buttonObj: $('[_dn_cdn_operation]').find('a.btn-link')
+        }).click(function($li) {
+            if ($li.hasClass("disabled")) {
+                return;
+            }
+            if (!operationVerify()) {
+                tips.error('该域名暂不支持修改，如需修改，请联系腾讯云技术人员。')
+                return;
+            }
+            var selected = domainTable.getSelected();
+            var operation = $li.data("val");
+            var checkStatus = true;
+            if (operation == "close") {
+                selected.forEach(function(item, index) {
+                    if (item.status != 5) {
+                        checkStatus = false;
+                    }
+                });
+                if (!checkStatus) {
+                    tips.error('关闭操作只能作用于“已启动”状态的域名，请重新选择。');
+                    return;
+                }
+                dialog.create(closeTmpl, '480', '', {
+                    title: '关闭CDN',
+                    preventResubmit: true,
+                    "class": "dialog_layer_v2 shutdown-cdn",
+                    button: {
+                        '确定关闭': function() {
+                            var data = {
+                                host_id: $.map(selected, function(item) {
+                                    return item.id
+                                }).join(","),
+                                enable_cdn: "no"
+                            };
+                            dialog.hide();
+                            setHostInfo(data).done(function(rs) {
+                                refresh();
+                                tips.success("关闭成功！");
+                            }).fail(function(rs) {
+
+                            });
+                        }
+                    }
+                });
+            }
+            else if (operation == "delete") {
+                selected.forEach(function(item, index) {
+                    if (item.status == 5 || item.status == 4) {
+                        checkStatus = false;
+                    }
+                });
+                if (!checkStatus) {
+                    tips.error('删除操作不能作用于“已启动”和“部署中”状态的域名，请重新选择。');
+                    return;
+                }
+                dialog.create(deleteTmpl, '480', '', {
+                    title: '删除源',
+                    preventResubmit: true,
+                    "class": "dialog_layer_v2 shutdown-cdn",
+                    button: {
+                        '确定': function() {
+                            dialog.hide();
+                            deleteHost($.map(selected, function(item) {
+                                return item.id
+                            }).join(",")).done(function(rs) {
+                                refresh();
+                                tips.success("删除域名成功！");
+                            }).fail(function(rs) {
+
+                            });
+                        }
+                    }
+                });
+            }
+            else if (operation == "modify_project") {
+                selected.forEach(function(item, index) {
+                    if (item.status != 5 && item.status != 4) {
+                        checkStatus = false;
+                    }
+                });
+                if (!checkStatus) {
+                    tips.error('只可修改【已启动】或【部署中】状态的域名。。');
+                    return;
+                }
+                dialog.create(tmpl.parse(modifyPprojectTmpl, {
+                    list: projectList
+                }), '480', '', {
+                    title: '修改所属项目',
+                    preventResubmit: true,
+                    "class": "dialog_layer_v2 select-project",
+                    button: {
+                        '确定': function() {
+                            var sVal = arguments[1].find("select").val();
+                            var idList = $.map(domainTable.getSelected(), function(item) {
+                                return item.id;
+                            });
+                            dialog.hide();
+                            setHostInfo({
+                                host_id: idList.join(","),
+                                project_id: sVal
+                            }).done(function(rs) {
+                                refresh();
+                                tips.success("修改域名所属项目成功！");
+                            }).fail(function(rs) {
+
+                            });
+                        }
+                    }
+                });
+            }
+        });
+
+        refresh();
+    };
+
+    var initTable = function() {
+        var colums = [{
+            key : 'domain',
+            name : '域名',
+            order : false,
+            insist : true
+        }, {
+            key : 'status',
+            name : '状态',
+            order : false
+        }, {
+            key : 'cname',
+            name : 'CNAME',
+            order : false,
+            width: "20%"
+        }, {
+            key : 'project',
+            name : '所属项目',
+            order : false
+        }, {
+            key : 'origin',
+            name : '接入方式',
+            order : false
+        }, {
+            key : 'type',
+            name : '业务类型',
+            order : false
+        }, {
+            key : 'operation',
+            name : '操作',
+            order : false
+        }];
+        domainTable = Bee.mount("domainTable", {
+            $data : {
+                canSelectTotal : true,// 是否允许所有项
+                emptyTips : '抱歉，没有找到相关数据。', // 列表为空时的提示,
+                // 表头/列配置
+                colums : colums,
+                maxHeightOffset : 10,// 最大高度的偏移值
+                hasFirst: true
+            },
+            statusOptions: [
+                {label: '已关闭', value: '6'},
+                {label: '部署中', value: '4'},
+                {label: '已启动', value: '5'}
+            ],
+            // originOptions: [
+            //     {label: 'COS源', value: 'cos'},
+            //     {label: '自有源', value: 'cname'},
+            //     {label: 'ftp托管源', value: 'ftp'}
+            // ],
+            typeOptions: [
+                {label: '静态加速', value: 'web'},
+                {label: '下载加速', value: 'download'},
+                {label: '流媒体加速', value: 'media'}
+            ],
+            events: {
+                'change .tc-15-checkbox': function(e) {
+                    var selected = domainTable.getSelected();
+                    if (selected.length > 0) {
+                        $('[_dn_cdn_operation] li').removeClass("disabled");
+                        $('[_dn_cdn_start]').removeClass("disabled");
+                    }
+                    else {
+                        $('[_dn_cdn_operation] li').addClass("disabled");
+                        $('[_dn_cdn_start]').addClass("disabled");
+                    }
+                },
+                'click tr [_dn_cdn_action="manage"]': function(e) {
+                    var host_id = $(e.target).attr('_dn_cdn_host_id');
+                    router.navigate("/cdn/access_oversea/manage/" + host_id);
+                }
+            },
+            getHeadContent: function(col) {
+                if(col.key === 'status') {
+                    return '<grid-view-header-filter b-ref="statusFilter" b-with="{ ready: statusFilterReady.bind(this.$root), filterOptions: statusOptions, col: col, change: statusChange.bind(this.$root)}"></grid-view-header-filter>'
+                }
+                // else if (col.key === 'project') {
+                //     return '<grid-view-header-filter b-ref="projectFilter" b-with="{ ready: projectFilterReady.bind(this.$root), filterOptions: projectOptions, col: col, change: projectChange.bind(this.$root)}"></grid-view-header-filter>'
+                // }
+                // else if (col.key === 'origin') {
+                //     return '<grid-view-header-filter b-ref="originFilter" b-with="{ ready: originFilterReady.bind(this.$root), filterOptions: originOptions, col: col, change: originChange.bind(this.$root)}"></grid-view-header-filter>'
+                // }
+                else if (col.key === 'type') {
+                    return '<grid-view-header-filter b-ref="typeFilter" b-with="{ ready: typeFilterReady.bind(this.$root), filterOptions: typeOptions, col: col, change: typeChange.bind(this.$root)}"></grid-view-header-filter>'
+                }
+            },
+            statusFilterReady: function(filter) {
+            },
+            // projectFilterReady: function(filter) {
+            // },
+            // originFilterReady: function(filter) {
+            // },
+            typeFilterReady: function(filter) {
+            },
+            statusChange: function(options) {
+                headOptions.status = {};
+                if (options) {
+                    options.forEach(function(item, index) {
+                        headOptions.status[item] = true;
+                    });
+                }
+                else {
+                    headOptions.status = null;
+                }
+                updateTable();
+            },
+            // originChange: function(options) {
+            //     headOptions.origin = {};
+            //     if (options) {
+            //         options.forEach(function(item, index) {
+            //             headOptions.origin[item] = true;
+            //         });
+            //     }
+            //     else {
+            //         headOptions.origin = null;
+            //     }
+            //     updateTable();
+            // },
+            // projectChange: function(options) {
+            // },
+            typeChange: function(options) {
+                headOptions.type = {};
+                if (options) {
+                    options.forEach(function(item, index) {
+                        headOptions.type[item] = true;
+                    });
+                }
+                else {
+                    headOptions.type = null;
+                }
+                updateTable();
+            },
+            getCellContent: function(val, item, col) {
+                var res = val || "";
+                if (col.key == 'operation') {
+                    return '<div class=""><a href="javascript:void(0)" _dn_cdn_action="manage" _dn_cdn_host_id="' + item.id + '">管理</a></div>'; 
+                }
+                else if (col.key == 'origin') {
+                    switch(item.origin) {
+                        case "cname": res = "自有源";break;
+                        case "cos": res = "COS源";break;
+                    }
+                }
+                else if (col.key == 'type') {
+                    switch(item.type) {
+                        case "web": res = "静态加速";break;
+                        case "download": res = "下载加速";break;
+                        case "media": res = "流媒体加速";break;
+                    }
+                }
+                else if (col.key == 'status') {
+                    switch(item.status) {
+                        case 4: res = '<i class="n-restart-icon"></i><span class="text-overflow">部署中</span>';break;
+                        case 5: res = '<i class="n-success-icon"></i><span class="text-overflow">已启动</span>';break;
+                        case 6: res = '<i class="n-shutdown-icon"></i><span class="text-overflow">已关闭</span>';break;
+                    }
+                    return res;
+                }
+                return '<span class="text-overflow">' +res+ '</span>';
+            },
+            getData: function(opts) {
+                var res = hostData || [];
+                var page = opts.page;
+                var count = opts.count;
+
+                if(!opts.type){
+                    this.setData({
+                        totalNum : res.length,
+                        page : page,
+                        count : count,
+                        list : res.slice((page - 1) * count, page * count),                       
+                    });
+                }   
+            }
+        })
+    };
+
+    var initEvent = function() {
+        // 添加域名按钮
+        $('[_dn_cdn_action="add_host"]').on('click', function(e) {
+            router.navigate("/cdn/access_oversea/guid");
+        });
+        // 搜索按钮
+        $('[_dn_cdn_search_button]').on("click", function(e) {
+            updateTable();
+        });
+        // 启动按钮
+        $('[_dn_cdn_start]').on("click", function(e) {
+            if ($(this).hasClass("disabled")) {
+                return;
+            }
+            // 校验readonly
+            if (!operationVerify()) {
+                tips.error('该域名暂不支持修改，如需修改，请联系腾讯云技术人员。')
+                return;
+            }
+            // 校验域名状态
+            var checkStatus = true;
+            var selected = domainTable.getSelected();
+            selected.forEach(function(item, index) {
+                if (item.status != 6) {
+                    checkStatus = false;
+                }
+            });
+            if (!checkStatus) {
+                tips.error('启动操作只能作用于“已关闭”状态的域名，请重新选择。');
+                return;
+            }
+            dialog.create(startCdnTmpl, '480', '', {
+                title: '开启CDN',
+                preventResubmit: true,
+                "class": "dialog_layer_v2 shutdown-cdn",
+                button: {
+                    '确定开启': function() {
+                        dialog.hide();
+                        var data = {
+                            host_id: $.map(domainTable.getSelected(), function(item) {
+                                return item.id
+                            }).join(","),
+                            enable_cdn: "yes"
+                        };
+                        setHostInfo(data).done(function(rs) {
+                            refresh();
+                            tips.success("开启CDN服务成功！");
+                        }).fail(function(rs) {
+
+                        });
+                    }
+                }
+            });
+        });
+        // 搜索框输入事件
+        $('[_dn_cdn_search_input]').on("keyup", function(e) {
+            if (e.keyCode == 13) {
+                updateTable();
+            }
+        });
+    };
+
+    var operationVerify = function() {
+        var canModify = true;
+        var selectObj = domainTable.getSelected();
+        selectObj.forEach(function(item, index) {
+            if (item.readonly != 0) {
+                canModify = false;
+            }
+        });
+        return canModify;
+    };
+
+    // 获取域名列表
+    var getHostList = function() {
+        var defer = $.Deferred();
+        dao.getHostListOv({
+            data: {},
+            success: {
+                "0": function(rs) {
+                    defer.resolve(rs);
+                },
+                "default": function(rs) {
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error(_defaultErrMsg);
+                    }
+                    defer.reject(rs);
+                }
+            }
+        });
+        return defer.promise();
+    };
+
+    // 删除域名
+    var deleteHost = function(host_id) {
+        var defer = $.Deferred();
+        dao.deleteHostOv({
+            data: {
+                host_id: host_id
+            },
+            success: {
+                "0": function(rs) {
+                    defer.resolve(rs);
+                },
+                "default": function(rs) {
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error(_defaultErrMsg);
+                    }
+                    defer.reject(rs);
+                }
+            }
+        });
+        return defer.promise();
+    };
+
+    var setHostInfo = function(data) {
+        var defer = $.Deferred();
+        dao.setHostListOv({
+            data: data,
+            success: {
+                "0": function(rs) {
+                    defer.resolve(rs);
+                },
+                "default": function(rs) {
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error(_defaultErrMsg);
+                    }
+                    defer.reject(rs);
+                }
+            }
+        });
+        return defer.promise();
+    };
+
+    var updateTable = function() {
+        var value = $.trim($('[_dn_cdn_search_input]').val());
+        var searchData = [];
+        var page = domainTable.$data.page;
+        var count = domainTable.$data.count;
+        hostData.forEach(function(item, index) {
+            if (item.domain.indexOf(value) > -1 && (!headOptions.status || headOptions.status[item.status]) && (!headOptions.origin || headOptions.origin[item.origin]) && (!headOptions.type || headOptions.type[item.type])) {
+                searchData.push(item);
+            }
+        });
+        domainTable.setData({
+            totalNum : searchData.length,
+            page : page,
+            count : count,
+            list : searchData.slice((page - 1) * count, searchData.length),                       
+        });
+    };
+
+    var refresh = function() {
+        // 灰化按钮
+        $('[_dn_cdn_operation] li').addClass("disabled");
+        $('[_dn_cdn_start]').addClass("disabled");
+        // 获取域名列表
+        getHostList().done(function(rs) {
+            var projectMap = {};
+            projectList = rs.data.projects;
+            rs.data.projects.forEach(function(item, index) {
+                projectMap[item.id] = item.name
+            });
+            if (rs.data.hosts && rs.data.hosts.length > 0) {
+                hostData = [];
+                rs.data.hosts.forEach(function(item, index) {
+                    hostData.push({
+                        id: item.host_id,
+                        domain: item.host,
+                        status: item.status,
+                        cname: item.cname,
+                        project: projectMap[item.project_id],
+                        project_id: item.project_id,
+                        origin: item.host_type,
+                        type: item.service_type,
+                        readonly: item.readonly
+                    });
+                });
+
+                updateTable();
+            }
+        }).fail(function(rs) {
+
+        });
+    };
+
+    return {
+        container: accessTemplate,
+        render: function() {
+            initTable();
+            initEvent();
+            initPage();
+        },
+        destroy: function() {
+            
+        }
+    }
+});
+/*  |xGv00|bdf58149d67f6ba352579edb7730bbae */

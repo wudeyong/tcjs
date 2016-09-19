@@ -1,0 +1,2611 @@
+define(function(require, exports, module) {
+    var $ = require("cdn/$");
+    var _ = require("cdn/lib/underscore");
+    var tmpl = require("cdn/lib/tmpl");
+    var dao = require('cdn/data/dao');
+    var tips = require('cdn/tips');
+    var dialog = require('cdn/dialog');
+    var router = require("cdn/router");
+    var util = require('cdn/util');
+    var ajaxPostForm = require('cdn/lib/ajaxPostForm');
+    var cdnUtil = require('cdn/lib/util');
+    var date = require('cdn/lib/date');
+    var Bee = require('qccomponent');
+    var nmc = require("cdn/nmc");
+
+    var manageTemplate = require("../../templates/domainmanage.html.js");
+
+
+    var $manageTemplate = $(manageTemplate)
+    var g_Template = {
+        container: $manageTemplate.filter('[_dn_tmpl="container"]').html(),
+        basic_setting: $manageTemplate.filter('[_dn_tmpl="basic_setting"]').html(),
+        error_tip: $manageTemplate.filter('[_dn_tmpl="error_tip"]').html(),
+        success_tip: $manageTemplate.filter('[_dn_tmpl="success_tip"]').html(),
+
+        basic_info_setting: $manageTemplate.filter('[_dn_tmpl="basic_info_setting"]').html(),
+        cache_info_setting: $manageTemplate.filter('[_dn_tmpl="cache_info_setting"]').html(),
+        fwd_host_setting: $manageTemplate.filter('[_dn_tmpl="fwd_host_setting"]').html(),
+        filter_qs_setting: $manageTemplate.filter('[_dn_tmpl="filter_qs_setting"]').html(),
+
+        advanced_setting: $manageTemplate.filter('[_dn_tmpl="advanced_setting"]').html(),
+        middle_source_setting: $manageTemplate.filter('[_dn_tmpl="middle_source_setting"]').html(),
+        link_protect_setting: $manageTemplate.filter('[_dn_tmpl="link_protect_setting"]').html(),
+        ip_protect_setting: $manageTemplate.filter('[_dn_tmpl="ip_protect_setting"]').html(),
+        https_setting: $manageTemplate.filter('[_dn_tmpl="https_setting"]').html(),
+        http_header_setting: $manageTemplate.filter('[_dn_tmpl="http_header_setting"]').html(),
+        http_header_dialog_row: $manageTemplate.filter('[_dn_tmpl="http_header_dialog_row"]').html(),
+        seo_setting: $manageTemplate.filter('[_dn_tmpl="seo_setting"]').html(),
+        origin_modify_dialog: $manageTemplate.filter('[_dn_tmpl="origin_modify_dialog"]').html(),
+        fwd_host_modify_dialog: $manageTemplate.filter('[_dn_tmpl="fwd_host_modify_dialog"]').html(),
+        cache_list: $manageTemplate.filter('[_dn_tmpl="cache_list"]').html(),
+        cache_sort_list: $manageTemplate.filter('[_dn_tmpl="cache_sort_list"]').html(),
+        cache_dialog: $manageTemplate.filter('[_dn_tmpl="cache_dialog"]').html(),
+        ftp_detail: $manageTemplate.filter('[_dn_tmpl="ftp_detail"]').html(),
+        modify_project_dialog: $manageTemplate.filter('[_dn_tmpl="modify_project_dialog"]').html(),
+        refer_item_list: $manageTemplate.filter('[_dn_tmpl="refer_item_list"]').html(),
+        modify_refer_dialog: $manageTemplate.filter('[_dn_tmpl="modify_refer_dialog"]').html(),
+        ip_item_list: $manageTemplate.filter('[_dn_tmpl="ip_item_list"]').html(),
+        modify_ip_dialog: $manageTemplate.filter('[_dn_tmpl="modify_ip_dialog"]').html(),
+        https_dialog: $manageTemplate.filter('[_dn_tmpl="https_dialog"]').html(),
+        http_header_dialog: $manageTemplate.filter('[_dn_tmpl="http_header_dialog"]').html(),
+        http_header_dialog_modify: $manageTemplate.filter('[_dn_tmpl="http_header_dialog_modify"]').html(),
+        http_header_dialog_delete: $manageTemplate.filter('[_dn_tmpl="http_header_dialog_delete"]').html(),
+        verify_dialog: $manageTemplate.filter('[_dn_tmpl="verify_dialog"]').html(),
+        delete_https_dialog: $manageTemplate.filter('[_dn_tmpl="delete_http_dialog"]').html(),
+        modify_bucket_dialog: $manageTemplate.filter('[_dn_tmpl="modify_bucket_dialog"]').html(),
+        modify_service_type_dialog: $manageTemplate.filter('[_dn_tmpl="modify_service_type_dialog"]').html()
+
+    }
+    var g_container; // render 的时候初始化
+    var g_data = {
+        rs: null,
+        hostid: null,
+        projects: [],
+        bucketNames: [],
+    };
+    var g_updateInterval; // 当正在部署时，自动检测是否部署完成
+    var UPDATE_INTERVAL = 60 * 1000;
+
+    var g_isDeploying;
+    function showDeploying() {
+        if (!g_isDeploying) {
+            addErrorTip('配置正在部署中，大约需要 5 分钟的时间。', 'deploying_tips');
+            g_isDeploying = true;
+            $('.deploy_done_tips').remove() // 删除部署完成
+
+            checkDeployDone()
+        }
+    }
+
+    function showDeployDone() {
+        if (g_isDeploying) {
+            addSuccessTip('部署完成', 'deploy_done_tips')
+            g_isDeploying = false;
+            $('.deploying_tips').remove() // 删除正在部署
+        }
+    }
+
+    function checkDeployDone() {
+        if (g_updateInterval) {
+            clearInterval(g_updateInterval)
+        }
+        g_updateInterval = setInterval(function () {
+            dao.getHostInfo({
+                data: {
+                    host_id: g_data.hostid
+                },
+                success: {
+                    "0": function(rs) {
+                        if (rs.data.status == 5) {
+                            clearInterval(g_updateInterval)
+                            showDeployDone();
+                        }
+                    },
+                    "default": function(rs) {
+                        if (rs.msg) {
+                            tips.error(rs.msg);
+                        } else {
+                            tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                        }
+                    }
+                }
+            });
+        }, UPDATE_INTERVAL)
+    }
+
+    function showMainPage() {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        if (rsData.readonly && rsData.lock_msg) { // 显示域名锁定提示
+            addErrorTip('锁定原因：' + rsData.lock_msg)
+        }
+
+        g_isDeploying = false;
+        if (rsData.status == 2 && rsData.authmsg) {
+            addErrorTip(rsData.authmsg)
+        } else if (rsData.status == 4) {
+            showDeploying();
+        }
+
+        g_container.find('[_dn_data=host]').text(rsData.host)
+
+        g_container.find('[_dn_action="back_to_access"]').click(function () {
+            router.navigate('/cdn/access')
+        })
+
+        showBasicSetting();
+    }
+
+    function showBasicSetting() {
+
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        var $setting = $(g_Template.basic_setting)
+
+        $setting.find('[_dn_data="basic_info_setting"]').html(
+            tmpl.parse(g_Template.basic_info_setting, rsData)
+        )
+        addProjectEvent($setting)
+
+        renderOriginList($setting);
+        addOriginListEvent($setting);
+
+        addBucketEvent($setting);
+
+        // 修改业务类型事件
+        addServiceTypeEvent($setting);
+
+        showFtpInfo($setting);
+
+        $setting.find('[_dn_data="cache_info_setting"]').html(
+            tmpl.parse(g_Template.cache_info_setting, rsData)
+        )
+        renderCacheInfo($setting)
+        addCacheInfoEvent($setting)
+
+        if (rsData.host_type != 'cos' && rsData.host_type != 'ftp') {
+            $setting.find('[_dn_data="fwd_host_setting"]').html(
+                tmpl.parse(g_Template.fwd_host_setting, rsData)
+            )
+            addFwdHostEvent($setting)
+        }
+
+
+        $setting.find('[_dn_data="filter_qs_setting"]').html(
+            tmpl.parse(g_Template.filter_qs_setting, rsData)
+        )
+        addFilterQsEvent($setting)
+
+        g_container.find('[_dn_data="settingPanel"]').html($setting)
+
+        g_container.find('[_dn_action="switch_advanced"]').click(function () {
+            showAdvancedSetting();
+        })
+    }
+
+    function addProjectEvent(container) {
+        container.find('[_dn_action="modify_project"]').click(function (e) {
+            var $this = $(this);
+
+            var modifyStr = tmpl.parse(g_Template.modify_project_dialog, {
+                projects: g_data.projects
+            })
+
+            var $that = $this
+            var $dialog = dialog.create(modifyStr, '480', '', {
+                title: '修改所属项目',
+                "class": "dialog_layer_v2 shutdown-cdn",
+                button: {
+                    '确认': function ($btn, $dialog) {
+
+                        var projectId = $dialog.find('[_dn_data="modify_project_input"]').val();
+                        var projectName = $dialog.find('[_dn_data="modify_project_input"]  option:selected').text()
+
+                        setHostList({
+                            host_id: g_data.hostid,
+                            project_id: projectId
+                        }, function(rs) {
+
+                            g_data.rs.project_id = projectId;
+
+                            $that.attr('_dn_project_id', projectId)
+                            container.find('[_dn_data="project_name"]').text(projectName)
+                            dialog.hide()
+                            tips.success('修改所属项目成功');
+                        })
+
+
+                    }
+                }
+            })
+
+            $dialog.find('[_dn_data="modify_project_input"]').val($this.attr('_dn_project_id'))
+        })
+    }
+
+    function addFilterQsEvent(container) {
+        container.find('[_dn_data="filter_qs_switch"]').change(function (e) {
+            var $this = $(this);
+
+            var furl_cache;
+            if ($this.prop('checked')) {
+                furl_cache = 'off'
+            } else {
+                furl_cache = 'on'
+            }
+
+            setHostList({
+                host_id: g_data.hostid,
+                furl_cache: furl_cache
+            }, function(rs) {
+                tips.success("修改过滤参数成功！");
+
+                g_data.rs.data.furl_cache = furl_cache;
+            })
+        })
+    }
+
+    var isCacheShowMore = false;
+    function renderCacheInfo(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+        var $showMore; // _render 的时候赋值
+        var cacheType = {
+            0: '全部',
+            1: '文件类型',
+            2: '文件夹',
+            3: '全路径文件'
+        };
+
+        var cacheList = rsData.cache;
+
+        if (cacheList.length <= 5 || isCacheShowMore) {
+            _render(cacheList)
+            $showMore.hide()
+        } else {
+
+            _render(cacheList.slice(0, 5))
+            $showMore.show()
+
+            $showMore.click(function () {
+                isCacheShowMore = true;
+                _render(cacheList)
+                $showMore.hide();
+            })
+        }
+
+
+        function _render(cacheList) {
+            var cacheListStr = tmpl.parse(g_Template.cache_list, {cache: cacheList, can_modify: rsData.can_modify, cacheType: cacheType});
+            container.find('[_dn_data="cache_list"]').html(cacheListStr)
+            $showMore = container.find('[_dn_action="cache_show_more"]')
+            // 添加事件
+            addCacheListEvent(container)
+        }
+
+    }
+
+    function showVerifyDialog(options) {
+        var title = options.title;
+        var confirmText = options.text;
+        var callback = options.callback;
+
+        var $dialog = dialog.create(g_Template.verify_dialog, '480', '', {
+            title: title,
+            "class": "dialog_layer_v2 shutdown-cdn",
+            onload: function ($dialog) {
+                $dialog.find('[_dn_data="verity_confirm_txt"]').text(confirmText)
+            },
+            button: {
+                '确认': function () {
+                    callback();
+                }
+            }
+        })
+
+        return $dialog;
+    }
+
+    function showDeleteConfirmDialog(options) {
+        var title = options.title;
+        var confirmText = options.text;
+        var callback = options.callback;
+
+        var $dialog = dialog.create(tmpl.parse(g_Template.delete_https_dialog, g_data.rs.data), '550', '', {
+            title: title,
+            "class": "dialog_layer_v2 shutdown-cdn",
+            onload: function ($dialog) {
+                if (confirmText)
+                {
+                    $dialog.find('[_dn_data="delete_https_confirm_txt"]').text(confirmText);
+                }
+            },
+            button: {
+                '确认': function ($btn, $dialog) {
+                    callback($btn, $dialog);
+                }
+            }
+        })
+
+        return $dialog;
+    }
+
+    function addCacheListEvent(container) {
+        var rsData = g_data.rs.data
+        var hostid = g_data.hostid;
+
+        container.find('[_dn_action="delete_a_cache_rule"]').click(function (e) {
+            var $this = $(this);
+
+            var cacheIndex = $this.closest('[_dn_data="cache_item"]').attr('_dn_index')
+
+
+            var cacheList = _.clone(rsData.cache)
+            cacheList.splice(cacheIndex, 1)
+
+            var cacheMode = rsData.cache_mode;
+            
+            var $dialog = showVerifyDialog({
+                title: '删除缓存配置',
+                text: '确定删除缓存配置？',
+                callback: function () {
+                    setHostList({
+                        host_id: hostid,
+                        cache_mode: cacheMode,
+                        cache: JSON.stringify(cacheList)
+                    }, function (rs) {
+                        tips.success('删除缓存设置成功');
+
+                        rsData.cache = cacheList;
+
+                        renderCacheInfo(container)
+
+                        dialog.hide()
+                    })
+                }
+            })
+        })
+
+        container.find('[_dn_action="modify_a_cache_rule"]').click(function (e) {
+            var $this = $(this);
+
+            var cacheIndex = $this.closest('[_dn_data="cache_item"]').attr('_dn_index')
+
+            var cacheItem = rsData.cache[cacheIndex]
+
+            var $dialog = showCacheDialog({
+                container: container,
+                title: '修改缓存配置',
+                successTips: "修改缓存过期设置成功！",
+                saveLocal: function (_cacheItem, cacheList) {
+                    if(_cacheItem[1] === 'all') {
+                        _cacheItem[0] = 0
+                    }
+
+                    cacheList[cacheIndex] = _cacheItem
+                }
+            });
+
+            // 设置默认值
+            var secondToTime = (function () {
+                var map = {
+                    d: 86400,
+                    h: 3600,
+                    m: 60,
+                    s: 1,
+                };
+
+                return Number(cacheItem[2]) / map[cacheItem[3]]
+            })()
+
+            var shortTimerange = {
+                d: 'day',
+                h: 'hour',
+                m: 'minute',
+                s: 'second',
+            }
+
+            var inputRuleType = $dialog.find('[name="cache_rule_type"]')
+            var inputContent = $dialog.find('[_dn_data="cache_rule_content"]')
+            if (cacheItem[0] == 1) {
+                inputRuleType = inputRuleType.filter('[value=file]')
+            } else if (cacheItem[0] == 2) {
+                inputRuleType = inputRuleType.filter('[value=dir]')
+            } else if (cacheItem[0] == 3) {
+                inputRuleType = inputRuleType.filter('[value=furl]')
+            }
+            inputRuleType.prop('checked', true).change()
+
+            $dialog.find('[_dn_data="cache_rule_content"]').val(cacheItem[1])
+            $dialog.find('[_dn_data="cache_rule_time"]').val(secondToTime)
+            $dialog.find('[_dn_data="cache_url_timerange"]').val(shortTimerange[cacheItem[3]]).change()
+
+
+            // END 设置默认值
+
+            if (cacheItem[0] === 0) {
+                inputContent.closest('li').hide();
+                inputRuleType.closest('li').hide();
+            }
+        })
+    }
+
+    function addCacheSortListEvent(container) {
+        var rsData = g_data.rs.data
+        var hostid = g_data.hostid;
+        var cacheType = {
+            0: '全部',
+            1: '文件类型',
+            2: '文件夹',
+            3: '全路径文件'
+        };
+
+        container.find('[_dn_action="up_a_cache_rule"]').click(function (e) {
+            var $this = $(this);
+            var cacheList = rsData._cacheSort;
+            var cacheIndex = $this.closest('[_dn_data="cache_item"]').attr('_dn_index') - 0;
+            var cacheItem = cacheList[cacheIndex];
+            
+
+
+            var popItem = cacheList.splice(cacheIndex, 1)[0];
+
+            cacheList.splice(cacheIndex-1, 0, popItem);
+
+            var cacheSortListStr = tmpl.parse(g_Template.cache_sort_list, {cache: cacheList, can_modify: rsData.can_modify, cacheType: cacheType});
+            container.find('[_dn_data="cache_sort_list"]').html(cacheSortListStr);
+            addCacheSortListEvent(container)
+        })
+
+        container.find('[_dn_action="down_a_cache_rule"]').click(function (e) {
+            var $this = $(this);
+            var cacheList = rsData._cacheSort;
+            var cacheIndex = $this.closest('[_dn_data="cache_item"]').attr('_dn_index') - 0;
+            var cacheItem = cacheList[cacheIndex];
+
+
+            var popItem = cacheList.splice(cacheIndex, 1)[0];
+
+            cacheList.splice(cacheIndex+1, 0, popItem);
+
+            var cacheSortListStr = tmpl.parse(g_Template.cache_sort_list, {cache: cacheList, can_modify: rsData.can_modify, cacheType: cacheType});
+            container.find('[_dn_data="cache_sort_list"]').html(cacheSortListStr);
+            addCacheSortListEvent(container)
+        })
+    }
+
+    function addCacheInfoEvent(container) {
+        var rsData = g_data.rs.data
+        var hostid = g_data.hostid;
+
+        container.find('[_dn_data="cache_mode"]').change(function () {
+            var $this = $(this);
+            var cacheMode;
+            if ($this.prop('checked')) {
+                cacheMode = 'custom'
+            } else {
+                cacheMode = 'simple'
+            }
+            setHostList({
+                host_id: hostid,
+                cache_mode: cacheMode,
+                cache: JSON.stringify(rsData.cache)
+            }, function (rs) {
+                tips.success('修改高级缓存过期配置成功');
+
+                g_data.rs.data.cache_mode = cacheMode;
+            }, function(rs) {
+                // 失败恢复原状
+                $this.prop('checked', !$this.prop('checked'));
+            });
+
+        })
+
+        container.find('[_dn_action="add_a_cache_rule"]').click(function () {
+            var $dialog = showCacheDialog({
+                container: container,
+                title: '添加缓存配置',
+                successTips: "新增缓存过期设置成功！",
+                saveLocal: function (cacheItem, cacheList) {
+                    cacheList.push(cacheItem)
+                }
+            });
+        })
+
+        container.find('[_dn_action="mod_cache_sort"]').click(function () {
+
+            // 创建_cacheSort
+            rsData._cacheSort = rsData._cacheSort || _.clone(rsData.cache);
+
+            var cacheType = {
+                0: '全部',
+                1: '文件类型',
+                2: '文件夹',
+                3: '全路径文件'
+            };
+            
+
+            var cacheList = rsData.cache;
+            var cacheSortListStr = tmpl.parse(g_Template.cache_sort_list, {cache: cacheList, can_modify: rsData.can_modify, cacheType: cacheType});
+            container.find('[_dn_data="cache_sort_list"]').html(cacheSortListStr);
+            addCacheSortListEvent(container)
+
+            container.find('[_dn_action="cache_list_wrap"]').hide();
+            container.find('[_dn_action="cache_sort_list_wrap"]').show();
+            container.find('[_dn_action="add_a_cache_rule"]').addClass('disabled').attr('disabled', true);
+            container.find('[_dn_action="mod_cache_sort"]').addClass('disabled').attr('disabled', true);
+
+        })
+
+        container.find('[_dn_action="save_cache_sort"]').click(function () {
+
+            var cacheList = _.clone(rsData._cacheSort)
+
+            setHostList({
+                host_id: hostid,
+                cache_mode: rsData.cache_mode,
+                cache: JSON.stringify(cacheList)
+            }, function (rs) {
+
+                tips.success("修改缓存配置优先级成功！");
+
+                rsData.cache = cacheList;
+
+                container.find('[_dn_action="cache_sort_list_wrap"]').hide();
+                container.find('[_dn_action="cache_list_wrap"]').show();
+                container.find('[_dn_action="add_a_cache_rule"]').removeClass('disabled').removeAttr('disabled');
+                container.find('[_dn_action="mod_cache_sort"]').removeClass('disabled').removeAttr('disabled');
+
+                renderCacheInfo(container)
+            })
+
+        })
+
+        container.find('[_dn_action="cancel_cache_sort"]').click(function () {
+
+            container.find('[_dn_action="cache_sort_list_wrap"]').hide();
+            container.find('[_dn_action="cache_list_wrap"]').show();
+            container.find('[_dn_action="add_a_cache_rule"]').removeClass('disabled').removeAttr('disabled');
+            container.find('[_dn_action="mod_cache_sort"]').removeClass('disabled').removeAttr('disabled');
+
+            renderCacheInfo(container)
+
+        })
+    }
+
+    function showCacheDialog(options) {
+        var rsData = g_data.rs.data
+        var hostid = g_data.hostid;
+        var container = options.container;
+
+        var dialogTmpl = tmpl.parse(g_Template.cache_dialog, rsData);
+        var $dialog = dialog.create(dialogTmpl, '590', '', {
+            title: options.title,
+            "class": "dialog_layer_v2 shutdown-cdn",
+            onload: function ($dialog) {
+                var inputContent = $dialog.find('[_dn_data="cache_rule_content"]')
+                var inputTime = $dialog.find('[_dn_data="cache_rule_time"]')
+                var inputTimerange = $dialog.find('[_dn_data="cache_url_timerange"]')
+                var inputCacheRuleType = $dialog.find('[name="cache_rule_type"]')
+                var refreshTips = $dialog.find('[_dn_data="cache_refresh_tips"]')
+
+                inputCacheRuleType.change(function (e) {
+                    var $this = $(this)
+                    var ruleType = $this.val();
+
+                    if (ruleType == 'file') {
+                        inputContent.attr('placeholder', ".jpg;.png;.css");
+                    } else if (ruleType == 'dir') {
+                        inputContent.attr('placeholder', "/test;/a/b/c （不能以“/”结尾）")
+                    } else if (ruleType == 'furl') {
+                        inputContent.attr('placeholder', "/index.html;/test/*.jpg;")
+                    }
+                    inputContent.val('')
+                    inputContent.placeholder()
+
+
+                    validateColumn()
+                })
+
+                function convertSecond(time, range) {
+                    var map = {
+                        day: 86400,
+                        hour: 3600,
+                        minute: 60,
+                        second: 1,
+                    };
+
+                    return Number(time) * map[range]
+                }
+
+                function updateSecond() {
+                    var timeVal = inputTime.val().trim();
+                    var ruleTimerange = inputTimerange.val().trim();
+
+                    var timeToSecond = convertSecond(timeVal, ruleTimerange)
+
+                    inputTime.data('second', timeToSecond)
+
+                    //console.log('timeToSecond', timeToSecond)
+                }
+
+                inputTimerange.change(function (e) {
+                    validateColumn()
+                })
+
+                inputContent.keyup(function (e) {
+                    validateColumn()
+                })
+
+                inputTime.keyup(function (e) {
+                    validateColumn()
+                })
+
+                function validateColumn() {
+                    updateSecond()
+
+                    var contentVal = inputContent.val().trim()
+                    var timeVal = inputTime.val().trim();
+                    var validateOk = true;
+                    var ruleType = inputCacheRuleType.filter(':checked').val();
+
+                    var timeToSecond = inputTime.data('second')
+                    refreshTips.hide()
+
+                    if (contentVal == 'all') {
+
+                    } else {
+                        if (ruleType == 'file' && !/^\.[^;]+(;\.[^;]+)*$/.test(contentVal)) {
+                            validateOk = false;
+                        } else if (ruleType == 'dir' && !/^\/[^;]+(;\/[^;]+)*$/.test(contentVal)) {
+                            validateOk = false;
+                        } else if (ruleType == 'furl' && !/^\/[^;]*(;\/[^;]*)*$/.test(contentVal)) {
+                            validateOk = false;
+                        }
+                    }
+
+
+                    if (!/^\d+$/.test(timeVal)) {
+                        validateOk = false;
+                    } else {
+                        if (timeToSecond <= 300 && rsData.host_type == 'ftp') {
+                            validateOk = false;
+                            refreshTips.text('FTP缓存时间设置最大值不能小于300秒，请修改后重新设置').show()
+                        } else if (timeToSecond == 0) {
+                            refreshTips.text('缓存时间设置为0，会让命中该规则的文件直接代理回源站').show()
+                        } else if (timeToSecond > 4294967296) {
+                            validateOk = false;
+                            refreshTips.text('缓存时间设置最大值不能超过4294967296，请修改后重新设置').show()
+                        }
+                    }
+
+                    //console.log(inputCacheRuleType, ruleType, validateOk, 9999)
+                    if (validateOk) {
+                        enableSubmit($dialog, true);
+                    } else {
+                        enableSubmit($dialog, false)
+                    }
+                }
+
+                // 初始化
+                updateSecond()
+                $dialog.find('[name="cache_rule_type"][value=file]').prop('checked', true).change()
+            },
+            button: {
+                '确定': function ($btn, $dialog) {
+                    var inputContent = $dialog.find('[_dn_data="cache_rule_content"]')
+                    var inputTime = $dialog.find('[_dn_data="cache_rule_time"]')
+                    var inputTimerange = $dialog.find('[_dn_data="cache_url_timerange"]')
+
+                    var cacheMode = rsData.cache_mode;
+                    var ruleType = $dialog.find('[name="cache_rule_type"]:checked').val().trim();
+                    var ruleContent = inputContent.val().trim();
+                    var ruleTime = inputTime.val().trim();
+                    var ruleTimerange = inputTimerange.val().trim();
+
+                    var _type, _timerange;
+
+                    if (ruleType == 'file') {
+                        _type = 1
+                    } else if (ruleType == 'dir') {
+                        _type = 2
+                    } else if (ruleType == 'furl') {
+                        _type = 3
+                    }
+
+                    var timeToSecond = inputTime.data('second')
+
+                    _timerange = ruleTimerange[0]
+
+                    var cacheItem = [_type, ruleContent, timeToSecond, _timerange]
+
+                    var cacheList = _.clone(rsData.cache)
+                    options.saveLocal(cacheItem, cacheList)
+
+                    setHostList({
+                        host_id: hostid,
+                        cache_mode: cacheMode,
+                        cache: JSON.stringify(cacheList)
+                    }, function (rs) {
+
+                        tips.success(options.successTips);
+                        dialog.hide();
+
+                        rsData.cache = cacheList;
+
+                        renderCacheInfo(container)
+                    })
+                }
+            }
+        })
+
+        return $dialog;
+    }
+
+    function addFwdHostEvent(container) {
+        var modifyBtn = container.find('[_dn_action="fwd_host_modify"]')
+        var dialogTmpl = tmpl.parse(g_Template.fwd_host_modify_dialog, g_data.rs.data);
+        modifyBtn.click(function () {
+            dialog.create(dialogTmpl, '590', '', {
+                title: '修改回源类型',
+                //preventResubmit: true,
+                "class": "dialog_layer_v2 shutdown-cdn",
+                onload: function ($dialog) {
+                    var $tips = $dialog.find('[_dn_data="fwd_host_modify_tips"]')
+                    var $defaultInput = $dialog.find('[_dn_data="fwd_host_modify_default"]')
+                    var $customInput = $dialog.find('[_dn_data="fwd_host_modify_custom"]')
+                    var $inputContent = $dialog.find('[_dn_data="fwd_host_modify_input"]')
+
+                    function hideAll() {
+                        $defaultInput.hide();
+                        $customInput.hide()
+                    }
+
+                    $dialog.find('[name="fwd_host_type"]').change(function () {
+
+                        var $this = $(this);
+                        if ($this.val() == 'default') {
+                            $tips.text('默认回源host是您的加速域名')
+                            hideAll()
+                            $defaultInput.show()
+                            enableSubmit($dialog, true)
+                        } else if ($this.val() == 'custom') {
+                            $tips.text('您可以自定义回源host，请保证该域名可以访问源站')
+                            hideAll()
+                            $customInput.show()
+                            checkValid()
+                        }
+                    })
+
+                    $inputContent.keyup(function () {
+                        checkValid()
+                    })
+
+                    function checkValid() {
+                        var host = $inputContent.val().trim()
+                        var flag = true;
+
+                        if (!cdnUtil.testDomain(host)) {
+                            flag = false;
+                        }
+                        enableSubmit($dialog, flag)
+                    }
+
+                    if (g_data.rs.data.fwd_host_type === 'default') {
+                        $dialog.find('[name="fwd_host_type"][value=default]').prop('checked', true).change()
+                    } else if (g_data.rs.data.fwd_host_type === 'custom') {
+                        $dialog.find('[name="fwd_host_type"][value=custom]').prop('checked', true).change()
+                        $inputContent.val(g_data.rs.data.fwd_host).keyup()
+                    }
+
+                },
+                button: {
+                    '确定': function($btn, $dialog) {
+
+                        var fwdHostType = $dialog.find('[name="fwd_host_type"]:checked').val();
+                        var hostid = g_data.hostid;
+
+                        var fwdHost;
+                        if (fwdHostType == 'default') {
+                            fwdHost = g_data.rs.data.host;
+                            fwdHostType = 'default'
+                        } else if (fwdHostType == 'custom') {
+                            fwdHost = $dialog.find('[_dn_data="fwd_host_modify_input"]').val().trim()
+                            fwdHostType = 'custom'
+                        }
+
+                        var data = {
+                            host_id: hostid,
+                            fwd_host: fwdHost,
+                            fwd_host_type: fwdHostType,
+                        }
+
+                        setHostList(data, function (rs) {
+                            tips.success("修改域名回源host成功！");
+                            container.find('[_dn_data="fwd_host_detail"]').text(fwdHost);
+                            dialog.hide();
+
+                            g_data.rs.data.fwd_host = fwdHost;
+                            g_data.rs.data.fwd_host_type = fwdHostType;
+                        })
+                    }
+                }
+            });
+        })
+
+    }
+
+    function addBucketEvent(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        if (rsData.host_type != 'cos') {
+            return;
+        }
+
+        container.find('[_dn_action="bucket_modify"]').click(function (e) {
+            var $this = $(this);
+
+            var modifyStr = tmpl.parse(g_Template.modify_bucket_dialog, {
+                project_list: g_data.project_list
+            });
+
+            var $that = $this;
+            var $dialog = dialog.create(modifyStr, '480', '', {
+                title: '修改bucket',
+                "class": "dialog_layer_v2 shutdown-cdn",
+                onload: function($dialog) {
+                    // 下拉框选择事件
+                    $dialog.find('[_dn_cdn_bucket_select_panel]').off('click').on("click", function(e) {
+                        var target = $(e.target);
+                        var value = target.data("value");
+                        var text = target.text();
+                        var project_id = target.data("id");
+                        if (project_id == undefined)
+                        {
+                            return;
+                        }
+                        $dialog.find('[_dn_cdn_bucket_input]').val(text);
+                        $dialog.find('[_dn_cdn_bucket_input]').data("val", value);
+                        $dialog.find('[_dn_cdn_bucket_input]').data("id", project_id);
+                        $dialog.find('[_dn_cdn_bucket_input]').removeClass("checkerror");
+                        $dialog.find('[_dn_cdn_bucket_select_panel]').toggle();
+                    });
+                    // 初始化下拉框收缩事件
+                    $dialog.find('[_dn_cdn_bucket_up_down]').off('click').on("click", function(e) {
+                        $dialog.find('[_dn_cdn_bucket_select_panel]').toggle();
+                    });
+                    // 输入搜索事件
+                    $dialog.find('[_dn_cdn_bucket_input]').off('keyup').on("keyup", function(e) {
+                        $dialog.find('[_dn_cdn_bucket_select_panel]').show();
+                        var value = $.trim($(e.target).val());
+                        if (!value)
+                        {
+                            $dialog.find('[_dn_cdn_bucket_select_panel] li[data-value]').show();
+                            $dialog.find('[_dn_cdn_bucket_input]').addClass("checkerror");
+                        }
+                        else {
+                            $dialog.find('[_dn_cdn_bucket_select_panel] li[data-value]').hide();
+                            $dialog.find('[_dn_cdn_bucket_select_panel] li[data-value*="' + value + '"]').show();
+                        }
+                        if ($dialog.find('[_dn_cdn_bucket_select_panel] li[data-value*="' + value + '"]').length == 0) {
+                            $dialog.find('[_dn_cdn_no_result]').show();
+                        }
+                        else {
+                            $dialog.find('[_dn_cdn_no_result]').hide();
+                        }
+
+                    });
+                },
+                button: {
+                    '确认': function ($btn, $dialog) {
+
+                        var bucketId = $dialog.find('[_dn_cdn_bucket_input]').data("val");
+                        var bucket_project_id = $dialog.find('[_dn_cdn_bucket_input]').data("id");
+                        var bucketName = $.trim($dialog.find('[_dn_cdn_bucket_input]').val());
+                        if (bucket_project_id == undefined || bucketName == "") {
+                            tips.error('修改失败');
+                            return;
+                        }
+
+                        setHostList({
+                            host_id: g_data.hostid,
+                            bucket_name: bucketId,
+                            bucket_project_id: bucket_project_id
+                        }, function(rs) {
+
+                            g_data.rs.bucket_name = bucketId;
+                            rsData.bucket_name = bucketId;
+                            container.find('[_dn_data="bucket_name"]').text(bucketName);
+                            dialog.hide();
+                            tips.success('修改bucket成功');
+                        })
+
+
+                    }
+                }
+            });
+
+            $dialog.find('[_dn_cdn_bucket_input]').val(rsData.bucket_name);
+        })
+    }
+
+    function addServiceTypeEvent(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+        var serviceTypeMap = {
+            "web": "静态加速",
+            "download": "下载加速",
+            "media": "流媒体加速"
+        };
+
+        container.find("[_dn_cdn_action='service_type_modify']").click(function(e) {
+            var serviceType = rsData.service_type || "file";
+            var tempStr = tmpl.parse(g_Template.modify_service_type_dialog);
+            var $dialog = dialog.create(tempStr, '480', '', {
+                title: '修改业务类型',
+                "class": "dialog_layer_v2 shutdown-cdn",
+                button: {
+                    '确认': function ($btn, $dialog) {
+                        var _serviceType = $dialog.find('[_dn_cdn_action="modify_service_type_input"]').val();
+                        setHostList({
+                            host_id: hostid,
+                            service_type: _serviceType,
+                        }, function(rs) {
+
+                            dialog.hide();
+                            tips.success('修改业务类型成功！');
+                            rsData.service_type = _serviceType;
+                            rsData.service_type_txt = serviceTypeMap[_serviceType];
+                            // 修改完成后要重新设置面板显示的文字
+                            $("[_dn_cdn_data='service_type_txt']").text(rsData.service_type_txt);
+                        });
+                    }
+                }
+            });
+            // 设置单选框的初始值
+            $dialog.find('[_dn_cdn_action="modify_service_type_input"]').val(serviceType);
+        });
+    }
+
+    function trimMultiline(multiline) {
+        multiline = multiline.trim()
+        multiline = multiline.split(/\n+/)
+        multiline = _.map(multiline, function (origin) {
+            return origin.trim()
+        })
+        return multiline
+    }
+
+    function renderOriginList(container) {
+
+        var rsData = g_data.rs.data
+        var hostid = g_data.hostid;
+
+        if (rsData.host_type != 'cname') {
+            return;
+        }
+
+        var $showMore = container.find('[_dn_action="origin_show_more"]')
+        var $showLess = container.find('[_dn_action="origin_show_less"]')
+
+        function buildOriginList(arr) {
+            var newArr = [];
+
+            for (var i = 0; i < arr.length; i+=2) {
+                if (arr[i+1]) {
+                    newArr.push([
+                        arr[i] + '、',
+                        arr[i+1],
+                    ].join(''))
+                } else {
+                    newArr.push([
+                        arr[i]
+                    ])
+                }
+
+            }
+
+            return newArr
+        }
+
+        function hideBtns() {
+            $showMore.hide()
+            $showLess.hide()
+        }
+
+        hideBtns()
+
+        function showPart() {
+            container.find("[_dn_data=origin_list]").html(buildOriginList(rsData.origin).slice(0, 5).join('<br>'))
+        }
+
+        function showFull() {
+            container.find("[_dn_data=origin_list]").html(buildOriginList(rsData.origin).join('<br>'))
+        }
+
+        if (rsData.origin.length / 2 <= 5) { // 小于5行
+            showFull()
+        } else {
+            $showMore.show()
+            showPart()
+        }
+
+        $showMore.click(function () {
+            showFull()
+            hideBtns()
+            $showLess.show()
+        })
+
+        $showLess.click(function () {
+            showPart()
+            hideBtns()
+            $showMore.show()
+        })
+
+
+    }
+
+    function addOriginListEvent(container) {
+        var rsData = g_data.rs.data
+        var hostid = g_data.hostid;
+
+        container.find('[_dn_action="origin_modify"]').click(function () {
+            var $dialog = dialog.create(g_Template.origin_modify_dialog, '590', '', {
+                title: '修改源站',
+                //preventResubmit: true,
+                "class": "dialog_layer_v2 shutdown-cdn",
+                onload: function ($dialog) {
+                    var $originModifyInput = $dialog.find('[_dn_data="origin_modify_input"]')
+                    $originModifyInput.val(rsData.origin.join('\n'))
+
+                    $originModifyInput.keyup(function (e) {
+                        validateOrigins()
+                    })
+
+                    function validateOrigins() {
+                        var origins = $originModifyInput.val();
+
+                        origins = trimMultiline(origins);
+
+                        var isok = true;
+
+                        if (origins.length == 1) {
+                            if (!cdnUtil.testDomainAndPort(origins[0]) && !cdnUtil.testIpAndPort(origins[0])) {
+                                isok = false;
+                            }
+                            if (origins[0].split(":")[0] == rsData.host) {
+                                isok = false;
+                            }
+                        } else {
+                            _.each(origins, function (origin) {
+                                if (!cdnUtil.testIpAndPort(origin)) {
+                                    isok = false;
+                                }
+                            })
+                        }
+
+                        enableSubmit($dialog, isok);
+                    }
+
+                    $originModifyInput.keyup()
+                },
+                button: {
+                    '确定': function($btn, $dialog) {
+                        var inputValue = $dialog.find('[_dn_data="origin_modify_input"]').val()
+
+                        var origins = trimMultiline(inputValue);
+
+                        setHostList({
+                            host_id: hostid,
+                            origin: origins.join(";")
+                        }, function(rs) {
+
+                            dialog.hide();
+                            tips.success('修改源站成功！')
+
+                            rsData.origin = origins;
+                            renderOriginList(container);
+                        });
+                    }
+                }
+            });
+        })
+    }
+
+    function setHostList(data, succ0, fail) {
+        dao.setHostList({
+            data: data,
+            success: {
+                "0": function () {
+                    showDeploying();
+                    succ0()
+                },
+                "default": function(rs) {
+                    if (fail) {
+                        fail();
+                    }
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                    }
+                }
+            }
+        });
+    }
+
+    function showAdvancedSetting() {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        var $setting = $(g_Template.advanced_setting);
+
+        g_container.find('[_dn_data="settingPanel"]').html($setting);
+
+        $setting.find('[_dn_data="seo_setting"]').html(tmpl.parse(g_Template.seo_setting, rsData));
+        addSeoEvent($setting);
+
+        $setting.find('[_dn_data="middle_source_setting"]').html(tmpl.parse(g_Template.middle_source_setting, rsData));
+        addMiddleSourceEvent($setting);
+
+        $setting.find('[_dn_data="link_protect_setting"]').html(tmpl.parse(g_Template.link_protect_setting, rsData));
+        renderLinkProtect($setting);
+        addLinkProtectEvent($setting);
+
+        $setting.find('[_dn_data="ip_protect_setting"]').html(tmpl.parse(g_Template.ip_protect_setting, rsData));
+        renderIpProtect($setting);
+        addIpProtectEvent($setting);
+
+        $setting.find('[_dn_data="https_setting"]').html(tmpl.parse(g_Template.https_setting, rsData));
+        if (!rsData.https.child && rsData.https.allow !== 0)
+        {
+            g_data.rs.httpsDetailTable = renderHttpsTable();
+            renderHttpsPanel($setting);
+        }
+
+        $setting.find('[_dn_data="http_header_setting"]').html(tmpl.parse(g_Template.http_header_setting, rsData));
+        renderHttpHeaderPanel($setting);
+
+        g_container.find('[_dn_action="switch_basic"]').click(function () {
+            showBasicSetting();
+        });
+    }
+
+    // 渲染https面板
+    function renderHttpsPanel(container) {
+        var rsData = g_data.rs.data;
+
+        var $httpsDetailTable = container.find('[_dn_data="https_detail"]')
+        container.find('[_dn_action="https_modify"]').off("click").on("click", function (e) {
+            showHttpsModifyPanel();
+        });
+
+        if (rsData.https.type == 0) {
+            $httpsDetailTable.hide();
+            showHideAddButton(true);
+        } else {
+            $httpsDetailTable.show();
+            showHideAddButton(false);
+
+            var data = [{
+                'https_type': isPlatfromProvide() ? '腾讯提供证书' : isThirdProvide() ? '第三方证书' : '自提供证书',
+                'https_fetch_type': isHttpFetch() ? 'http' : 'https',
+                'https_domain': rsData.https.domain || "",
+                'status': isThirdProvide() ? getHttpsStatus() : "已部署",
+                "expire_time" : (rsData.ssl_expire_time && date.formatDate(date.getDateInStr(rsData.ssl_expire_time), "YYYY-MM-DD")) || "",
+                'https_operation': '<div><span class="text-overflow"><a href="" _dn_cdn_action="modify" class="disable">修改</a><i class="black-seperate-line-icon" role="separator"></i><a href="#" _dn_cdn_action="delete">删除</a></span></div>'
+            }];
+
+            g_data.rs.httpsDetailTable.setData({
+                totalNum : 0,
+                page : 1,
+                count : 10,
+                list : data,
+                type: 'reload'
+            });
+        }
+
+        function isPlatfromProvide() {
+            return rsData.https.type == 1 || rsData.https.type == 3;
+        }
+        function isSelfProvide() {
+            return rsData.https.type == 2 || rsData.https.type == 4;
+        }
+        function isThirdProvide() {
+            return rsData.https.type == 5 || rsData.https.type == 6;
+        }
+        function isHttpFetch() {
+            return rsData.https.type == 1 || rsData.https.type == 2 || rsData.https.type == 5;
+        }
+        function isHttpsFetch() {
+            return rsData.https.type == 3 || rsData.https.type == 4 || rsData.https.type == 6;
+        }
+        function getHttpsStatus() {
+            if (rsData.ssl_status == 3){
+                return "已部署";
+            }
+            else if (rsData.ssl_status == 1 || rsData.ssl_status == 0)
+            {
+                return "验证中";
+            }
+            else {
+                return "验证失败";
+            }
+        }
+
+        function showHideAddButton(show) {
+            var button = container.find('[_dn_action="https_modify"]');
+            if (show) {
+                button.show();
+            }
+            else {
+                button.hide();
+            }
+
+        }
+    }
+
+    // 初始化https详细信息表格
+    function renderHttpsTable() {
+        var rsData = g_data.rs.data;
+        var canModify = rsData.can_modify;
+        var detailColums= [{
+                key : 'https_type',
+                name : '类型'
+            }, {
+                key : 'https_fetch_type',
+                name : '回源方式'
+            }, {
+                key : 'https_domain',
+                name : 'https域名'
+            }, {
+                key : 'status',
+                name : '证书状态'
+            }, {
+                key : 'expire_time',
+                name : '到期时间'
+            }, {
+                key : 'https_operation',
+                name : '操作'
+            }];
+        var _detailTable = {};
+        if ($("#https_detail_table").length > 0) {
+            _detailTable = Bee.mount('https_detail_table', {
+            $data : {
+                canSelectTotal : true,// 是否允许所有项
+                emptyTips : '抱歉，没有找到相关数据。', // 列表为空时的提示,
+                // 表头/列配置
+                colums : detailColums,
+                maxHeightOffset : 10,// 最大高度的偏移值
+                hasFirst: false,
+                height: "auto",
+                maxHeight: 108,
+                minHeight: 54,
+                showPagination: false,
+                showState: false,
+                trAttr : {// 给每个数据行添加的额外属性.
+                    "data-id" : 'id'
+                }
+            },
+            getCellContent: function(val, item, col) {
+                var res = val;
+                if(col && col.key=='https_operation'){
+                    res = '<div><span class="text-overflow"><a href="#" _dn_cdn_action="delete" class=' + (canModify ? "able" : "disable") + '>删除</a></span></div>';
+                }
+                return res;
+            },
+            events: {
+                'click tr a.able[_dn_cdn_action="delete"]': function(e) {
+                    var options = {};
+                    options.title = "关闭https配置";
+                    options.callback = function($btn, $dialog) {
+                        /*
+                        0 删除配置
+                         */
+                        var sslType = 0;
+
+                        $dialog.find('[_dn_data="https_type_input"]').val(sslType)
+
+                        // https 证书提交表单的时候需要用到全局函数接收回复
+                        window.cdn_https_submit_callback = function (rs) {
+                            var errCodeMsg = {
+                                "22035": "SSL类型错误",
+                                "22036": "SSL域名错误",
+                                "22037": "SSL开通错误",
+                                "22038": "SSL关闭错误",
+                                "22039": "当前用户暂无法开通中间源服务",
+                                "22040": "此域名已开通HTTPS服务",
+                                "22041": "此域名未启动CDN",
+                                "22042": "此域名开启腾讯证书ssl超过数量限制",
+                                "22054": "泛域名不能用腾讯证书",
+                                "9335": "开通HTTP服务出现错误,提交的文件不合法",
+                                "9336": "开通HTTP服务出现错误,提交的文件处理失败",
+                                "9348": "请求数据为空或者不合法",
+                                "9349": "请求数据不完整",
+                                "9351": "域名ID不合法",
+                                "9353": "域名ID不存在",
+                                "9363": "证书格式不正确",
+                                "9365": "私钥格式不正确",
+                                "9367": "证书私钥校验不正确",
+                                "9368": "证书校验不正确",
+                                "9369": "证书校验不正确",
+                                "9370": "证书私钥链校验不正确",
+                                "9372": "证书不能覆盖此域名"
+                            }
+
+                            if (rs.code != 0) {
+                                tips.error(errCodeMsg[rs.code] || rs.msg);
+                            } else {
+                                dialog.hide();
+                                tips.success('配置 https 成功！')
+
+                                var httpsData = rs.data[0].https
+                                rsData.https.domain = httpsData.domain;
+                                rsData.https.type = httpsData.type;
+
+                                renderHttpsPanel($(g_container.find('[_dn_data="settingPanel"]')));
+                            }
+
+                        }
+
+                        /* form post start */
+                        var form = $dialog.find('[_dn_data="https_form"]');
+                        form.attr('action', 'https:' + CDN.FormSender.serverUrl + '/ajax/api.php?action=set_host_https&g_tk=' + util.getACSRFToken());
+                        var iframeID = 'iframe_' + new Date().getTime();
+                        //document.domain = 'qcloud.com';
+
+                        ajaxPostForm.post.call(form[0], {
+                            iframeID: iframeID,
+                            post: function() {
+                                //$('.https-btns .submit').addClass('disable');
+                            },
+                            complete: function(d) {}
+                        });
+
+                        form.trigger('submit');
+                        /* form post end */
+                    };
+
+                    showDeleteConfirmDialog(options);
+                    e.preventDefault();
+                    return false;
+                }
+            }
+            });
+        }
+        
+        return _detailTable;
+    }
+
+    // 显示添加修改https的面板
+    function showHttpsModifyPanel() {
+        var rsData = g_data.rs.data;
+        var dialogStr = tmpl.parse(g_Template.https_dialog, rsData);
+        var $dialog = dialog.create(dialogStr, '590', '', {
+            title: 'https配置',
+            //preventResubmit: true,
+            "class": "dialog_layer_v2 shutdown-cdn",
+            onload: function ($dialog) {
+                var $fetchTypePanel = $dialog.find('[_dn_data="fetch_type_panel"]');
+                var $certPanel = $dialog.find('[_dn_data="cert_panel"]');
+                var $agreementPanel = $dialog.find('[_dn_cdn_action="agreement_panel"]');
+
+                $dialog.find('[_dn_data="cert_file"]').change(function (e) {
+                    $('[_dn_data="cert_text"]').val($(this).val());
+                    enableSubmit($dialog, isSelfProvide());
+                })
+
+                $dialog.find('[_dn_data="https_key_file"]').change(function (e) {
+                    $('[_dn_data="https_key_text"]').val($(this).val());
+                    enableSubmit($dialog, isSelfProvide());
+                })
+                $dialog.find('[_dn_data="https_contract"]').change(function() {
+                    if ($dialog.find('[name="cert_provide"]:checked').val() == 'self')
+                    {
+                        enableSubmit($dialog, isSelfProvide());
+                    }
+                    else {
+                        enableSubmit($dialog, !!$dialog.find('[_dn_data="https_contract"]').prop('checked'));
+                    }
+                })
+
+                $dialog.find('[name="cert_provide"]').change(function (e) {
+                    var $this = $(this);
+
+                    if ($this.val() == 'close') {
+                        hideAll();
+                    } else if ($this.val() == 'platform') {
+                        hideAll();
+                        $fetchTypePanel.show();
+                        enableSubmit($dialog, !!$dialog.find('[_dn_data="https_contract"]').prop('checked'));
+                    } else if ($this.val() == 'self') {
+                        hideAll();
+                        $fetchTypePanel.show();
+                        $certPanel.show();
+                        enableSubmit($dialog, isSelfProvide());
+                    } else if ($this.val() == 'third') {
+                        hideAll();
+                        $fetchTypePanel.show();
+                        enableSubmit($dialog, !!$dialog.find('[_dn_data="https_contract"]').prop('checked'));
+                    }
+                });
+
+                function hideAll() {
+                    $fetchTypePanel.hide();
+                    $certPanel.hide();
+                }
+
+                function isSelfProvide() {
+                    return $dialog.find('[_dn_data="cert_file"]').val() && $dialog.find('[_dn_data="https_key_file"]').val()
+                            && $dialog.find('[_dn_data="https_contract"]').prop('checked')
+                }
+
+                $dialog.find('[name="cert_provide"]').filter('[value=self]').prop('checked', true).change();
+                $dialog.find('[name="fetch_type"]').filter('[value="http"]').prop('checked', true).change();
+
+            },
+            button: {
+                '确定': function($btn, $dialog) {
+
+                    var certType = $dialog.find('[name="cert_provide"]:checked').val();
+                    var fetchType = $dialog.find('[name="fetch_type"]:checked').val();
+
+                    /*
+                    1 腾讯提供 + http 回源
+                    2 自提供 + http 回源
+                    3 腾讯提供 + https 回源
+                    4 自提供 + https 回源
+                     */
+                    var sslType = 0;
+
+                    if (certType == 'platform') {
+                        sslType += 1
+                    } else if (certType == 'self') {
+                        sslType += 2
+                    }
+
+                    if (fetchType == 'http') {
+                        sslType += 0
+                    } else if (fetchType == 'https') {
+                        sslType += 2
+                    }
+
+                    if (certType == 'third' && fetchType == "http") 
+                    {
+                        sslType = 5;
+                    } else if (certType == 'third' && fetchType == "https") {
+                        sslType = 6;
+                    }
+
+                    $dialog.find('[_dn_data="https_type_input"]').val(sslType)
+
+                    // https 证书提交表单的时候需要用到全局函数接收回复
+                    window.cdn_https_submit_callback = function (rs) {
+                        nmc.requestStop();
+                        var errCodeMsg = {
+                            "22035": "SSL类型错误",
+                            "22036": "SSL域名错误",
+                            "22037": "SSL开通错误",
+                            "22038": "SSL关闭错误",
+                            "22039": "当前用户暂无法开通中间源服务",
+                            "22040": "此域名已开通HTTPS服务",
+                            "22041": "此域名未启动CDN",
+                            "22042": "此域名开启腾讯证书ssl超过数量限制",
+                            "22054": "泛域名不能用腾讯证书",
+                            "9335": "开通HTTP服务出现错误,提交的文件不合法",
+                            "9336": "开通HTTP服务出现错误,提交的文件处理失败",
+                            "9348": "请求数据为空或者不合法",
+                            "9349": "请求数据不完整",
+                            "9351": "域名ID不合法",
+                            "9353": "域名ID不存在",
+                            "9363": "证书格式不正确",
+                            "9365": "私钥格式不正确",
+                            "9367": "证书私钥校验不正确",
+                            "9368": "证书校验不正确",
+                            "9369": "证书校验不正确",
+                            "9370": "证书私钥链校验不正确",
+                            "9372": "证书不能覆盖此域名"
+                        }
+
+                        if (rs.code != 0) {
+                            tips.error(errCodeMsg[rs.code] || rs.msg);
+                        } else {
+                            dialog.hide();
+                            tips.success('配置 https 成功！')
+
+                            var httpsData = rs.data[0].https
+                            rsData.https.domain = httpsData.domain;
+                            rsData.https.type = httpsData.type;
+
+                            renderHttpsPanel($(g_container.find('[_dn_data="settingPanel"]')));
+                        }
+
+                    }
+
+                    /* form post start */
+                    var form = $dialog.find('[_dn_data="https_form"]');
+                    form.attr('action', 'https:' + CDN.FormSender.serverUrl + '/ajax/api.php?action=set_host_https&g_tk=' + util.getACSRFToken());
+                    var iframeID = 'iframe_' + new Date().getTime();
+                    //document.domain = 'qcloud.com';
+
+                    // 校验文件格式与大小
+                    var $certFile = $dialog.find("[_dn_data='cert_file']");
+                    var $httpsKeyFile = $dialog.find("[_dn_data='https_key_file']");
+                    var $certFileInput = $dialog.find("[_dn_cdn_action='cert_file_input']");
+                    var $httpsKeyFileInput = $dialog.find("[_dn_cdn_action='key_file_input']");
+                    var $certFileError = $dialog.find("[_dn_cdn_action='cert_file_error']");
+                    var $httpsKeyFileError = $dialog.find("[_dn_cdn_action='key_file_error']");
+                    var fileTypeReg = /^.*\.pem$/;
+                    var keyTypeReg = /^.*\.(cert|cer)$/;
+                    var fileSizeLimit = 500 * 1024;
+                    if (certType == 'self')
+                    {
+                        var certFile = $certFile.prop('files')[0];
+                        var keyFile = $httpsKeyFile.prop('files')[0];
+                        if (!fileTypeReg.test(certFile.name) || certFile.size > fileSizeLimit)
+                        {
+                            $certFileInput.addClass("error");
+                            return;
+                        }
+                        if (keyTypeReg.test(keyFile.name) || keyFile.size > fileSizeLimit) {
+                            $httpsKeyFileInput.addClass("error");
+                            return;
+                        }
+                    }
+
+                    //校验成功去除错误提示
+                    $certFileInput.removeClass("error");
+                    $httpsKeyFileInput.removeClass("error");
+
+                    ajaxPostForm.post.call(form[0], {
+                        iframeID: iframeID,
+                        post: function() {
+                            //$('.https-btns .submit').addClass('disable');
+                        },
+                        complete: function(d) {},
+                        // 上传私钥格式不正确回调提示
+                        error: function(e) {
+                            tips.error("私钥格式不正确");
+                        }
+                    });
+
+                    form.trigger('submit');
+                    // 显示转菊花
+                    nmc.requestStart();
+                    /* form post end */
+
+                }
+            }
+        });
+    }
+
+    function renderHttpHeaderPanel(container) {
+        var headTable;
+        headTable = initHttpHeaderTable();
+        var data = [];
+        for (var key in g_data.rs.data.host_config.rsp_header.config_value)
+        {
+            data.push({
+                header: key,
+                setting: g_data.rs.data.host_config.rsp_header.config_value[key]
+            })
+        }
+        headTable.setData({
+            totalNum : 0,
+            page : 1,
+            count : 10,
+            list :data,
+            type:'reload'
+        });
+        if (data == 0) {
+            headTable._$el.hide();
+        }
+        container.find('[_dn_action="http_header_modify"]').off("click").on("click", function (e) {
+            var addBtn = $(e.target);
+            showHttpHeaderModifyPanel(headTable, addBtn);
+        });
+    }
+
+    function showHttpHeaderModifyPanel(headTable, addBtn) {
+        var rsData = g_data.rs.data;
+        var dialogStr = tmpl.parse(g_Template.http_header_dialog, rsData);
+        // 获取对应header的placeholder
+        var getPlaceholder = function(key) {
+            switch(key) {
+                case "Access-Control-Allow-Origin":  return "*或域名http://www.abc.com";
+                case "Access-Control-Allow-Methods":  return "请求类型，如GET，POST，OPTIONS";
+                case "Access-Control-Max-Age":  return "预请求有效时间，单位为秒";
+                // case "Cache-Control":  return "缓存机制，如max-age=600";
+                case "Content-Disposition":  return "激活文件下载，如attachment;filename=FileName.txt";
+                case "Content-Language":  return "浏览器响应语言，如zh-CN";
+            }
+        };
+        var $dialog = dialog.create(dialogStr, '810', '', {
+            title: '设置HTTP Header',
+            //preventResubmit: true,
+            struct: "rich",
+            "class": "tc-15-rich-dialog",
+            onload: function($dialog) {
+                var existHeader = [];
+                for (var key in g_data.rs.data.host_config.rsp_header.config_value){
+                    existHeader.push(key);
+                }
+                existHeader.forEach(function(item, index) {
+                    $dialog.find('option[_dn_cdn_data="' + item + '"]').remove();
+                });
+                var firstRowDefaultKey = $dialog.find("select").val();
+                $dialog.find("input").attr("placeholder", getPlaceholder(firstRowDefaultKey));
+                // 默认行的change事件 
+                $dialog.find('select').on("change", function(e) {
+                    var target = $(this);
+                    var key = target.val();
+                    $dialog.find('[_dn_cdn_action="first_input"]').attr("placeholder", getPlaceholder(key));
+                    var existRows = $dialog.find('[_dn_cdn_action="option_row"]');
+                    for (var i = 1; i < existRows.length; i++) {
+                        existRows.eq(i).find('option[_dn_cdn_data="' + key + '"]').remove();
+                        existRows.eq(i).find('select').append('<option _dn_cdn_data="' + firstRowDefaultKey + '">' + firstRowDefaultKey + '</option>');
+                    }
+                    firstRowDefaultKey = key;
+                });
+                if ($dialog.find("option").length == 1) {
+                    $dialog.find('[_dn_cdn_action="add_row"]').hide();
+                }
+
+                // 新增行事件
+                $dialog.find('[_dn_cdn_action="add_row"] a').on("click", function(e) {
+                    // 每新增一行都要去判断select来保证不能重复设置header
+                    var existRows = $dialog.find('[_dn_cdn_action="option_row"]');
+                    var keyArray = [];
+                    var defaultKey;
+                    for (var i = 0; i < existRows.length; i++) {
+                        keyArray.push(existRows.eq(i).find("select").val());
+                    }
+
+                    var row = $(g_Template.http_header_dialog_row);
+                    // 去除已有的头
+                    keyArray.forEach(function(item, index) {
+                        var option = row.find('[_dn_cdn_data="'+ item + '"]');
+                        if (option.length > 0){
+                            option.remove();
+                        }
+                    });
+                    existHeader.forEach(function(item, index) {
+                        var option = row.find('[_dn_cdn_data="'+ item + '"]');
+                        if (option.length > 0){
+                            option.remove();
+                        }
+                    });
+                  
+                    // “新增参数”按钮显隐控制
+                    if (row.find("option").length == 1) {
+                        $dialog.find('[_dn_cdn_action="add_row"]').hide();
+                    }
+                    else {
+                        $dialog.find('[_dn_cdn_action="add_row"]').show();
+                    }
+                    defaultKey = row.find("select").val();
+                    existRows.find('option[_dn_cdn_data="' + defaultKey + '"]').remove();
+                    // 插入页面前设置placeholer
+                    row.find("input").attr("placeholder", getPlaceholder(defaultKey));
+                    row.insertBefore($dialog.find('[_dn_cdn_action="add_row"]'));
+
+                    // 新增行的change事件，select变化时也要对选项进行增删操作
+                    row.find('select').on("change", function(e) {
+                        var target = $(this);
+                        var key = target.val();
+                        // 改变placeholer
+                        row.find("input").attr("placeholder", getPlaceholder(key));
+                        // 其他行对应增删选项
+                        existRows = $dialog.find('[_dn_cdn_action="option_row"]');
+                        for (var i = 0; i < existRows.length; i++) {
+                            if (existRows.eq(i).find("select").val() != key)
+                            {
+                                existRows.eq(i).find('option[_dn_cdn_data="' + key + '"]').remove();
+                                existRows.eq(i).find('select').append('<option _dn_cdn_data="' + defaultKey + '">' + defaultKey + '</option>');
+                            }
+                        }
+                        defaultKey = key;
+                    });
+                    row.find('[_dn_cdn_action="delete_row"]').on("click", function(e) {
+                        var target = $(this);
+                        var key = target.val();
+                        // 其他行对应增加选项
+                        existRows = $dialog.find('[_dn_cdn_action="option_row"]');
+                        existRows.find('select').append('<option _dn_cdn_data="' + defaultKey + '">' + defaultKey + '</option>');
+                        // 显示按钮
+                        $dialog.find('[_dn_cdn_action="add_row"]').show();
+                        target.parents('[_dn_cdn_action="option_row"]').remove();
+                    });
+                });
+            },
+            button: {
+                '确定': function($btn, $dialog) {
+                    var optionRows = $dialog.find('[_dn_cdn_action="option_row"]');
+                    var config={};
+                    var inputValue;
+                    var excReg = /^[\x20-\x7e]+$/;
+                    for (var i = 0; i < optionRows.length; i++) {
+                        inputValue =  optionRows.eq(i).find("input").val();
+                        if (!excReg.test(inputValue) || inputValue.length > 1000)
+                        {
+                            optionRows.eq(i).find("input").addClass("error");
+                            return;
+                        }
+                        optionRows.eq(i).find("input").removeClass("error");
+                        config[optionRows.eq(i).find("select").val()] = inputValue;
+                    }
+                    // 无论新增还是修改，都要将现有的设置一并传到后台
+                    for (var key in g_data.rs.data.host_config.rsp_header.config_value) {
+                        config[key] = g_data.rs.data.host_config.rsp_header.config_value[key];
+                    }
+                    setHostList({
+                        host_id: g_data.hostid,
+                        host_config: {
+                            rsp_header: {
+                                config_value: config
+                            }
+                        }
+                    }, function(rs) {
+                        tips.success("http header配置成功！");
+                        g_data.rs.data.host_config.rsp_header.config_value = config;
+                        var data = [];
+                        for (var key in config)
+                        {
+                            data.push({
+                                header: key,
+                                setting: config[key]
+                            })
+                        }
+                        
+                        headTable._$el.show();
+                        headTable.setData({
+                            totalNum : 0,
+                            page : 1,
+                            count : 10,
+                            list :data,
+                            type:'reload'
+                        });
+                        if (data.length == 6) {
+                            addBtn.hide();
+                        }
+                        $('[_dn_cdn_action="no_header_tip"]').hide();
+
+                    }, function(rs) {
+                        tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                    });
+                    dialog.hide();
+                }
+            }
+        });
+    }
+
+    function initHttpHeaderTable() {
+        var headTableColumn = [{
+            key : 'header',
+            name : 'Header 参数',
+            order : false,
+            insist : true
+        }, {
+            key : 'setting',
+            name : '设置',
+            order : false
+        }, {
+            key : 'operation',
+            name : '操作',
+            order : false
+        }];
+
+        var headTable = Bee.mount('http_header_table', {
+            events: {
+                'click .able[_dn_cdn_action="modify"]': function(e) {
+                    var target = $(e.target);
+                    var headerKey = target.attr("_dn_cdn_data");
+                    var headerValue = g_data.rs.data.host_config.rsp_header.config_value[headerKey];
+                    var rsData = g_data.rs.data;
+                    var dialogStr = tmpl.parse(g_Template.http_header_dialog_modify, rsData);
+                    var $dialog = dialog.create(dialogStr, '480', '', {
+                        title: '修改HTTP Header',
+                        //preventResubmit: true,
+                        struct: "rich",
+                        "class": "tc-15-rich-dialog",
+                        onload: function($dialog) {
+                            $dialog.find('[_dn_cdn_action="header_key"]').text(headerKey);
+                            $dialog.find('[_dn_cdn_action="header_value"]').val(headerValue);
+                        },
+                        button: {
+                            '确定': function($btn, $dialog) {
+                                var excReg = /^[\x20-\x7e]+$/;
+                                var config = {}
+                                var newValue = $dialog.find('[_dn_cdn_action="header_value"]').val();
+                                if (!excReg.test(newValue) || newValue.length > 1000)
+                                {
+                                    $dialog.find('[_dn_cdn_action="header_value"]').parent().addClass("error");
+                                    $dialog.find('[_dn_cdn_action="header_value"]').focus();
+                                    return;
+                                }
+                                $dialog.find('[_dn_cdn_action="header_value"]').parent().removeClass("error");
+                                for (var key in g_data.rs.data.host_config.rsp_header.config_value) {
+                                    if (key != headerKey)
+                                    {
+                                        config[key] = g_data.rs.data.host_config.rsp_header.config_value[key];
+                                    }
+                                    else {
+                                        config[headerKey] = newValue;
+                                    }
+                                }
+                                setHostList({
+                                    host_id: g_data.hostid,
+                                    host_config: {
+                                        rsp_header: {
+                                            config_value: config
+                                        }
+                                    }
+                                }, function(rs) {
+                                    tips.success("http header配置成功！");
+                                    g_data.rs.data.host_config.rsp_header.config_value = config;
+                                    var data = [];
+                                    for (var key in config)
+                                    {
+                                        data.push({
+                                            header: key,
+                                            setting: config[key]
+                                        })
+                                    }
+                                    headTable.setData({
+                                        totalNum : 0,
+                                        page : 1,
+                                        count : 10,
+                                        list :data,
+                                        type:'reload'
+                                    });
+                                }, function(rs) {
+                                    tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                                });
+                                dialog.hide();
+                            }
+                        }
+                    });
+                },
+                'click .able[_dn_cdn_action="delete"]': function(e) {
+                    var target = $(e.target);
+                    var headerKey = target.attr("_dn_cdn_data");
+                    var headerValue = g_data.rs.data.host_config.rsp_header.config_value[headerKey];
+                    var rsData = g_data.rs.data;
+                    var dialogStr = tmpl.parse(g_Template.http_header_dialog_delete, rsData);
+                    var $dialog = dialog.create(dialogStr, '480', '', {
+                        title: '删除Http Header设置',
+                        struct: "rich",
+                        "class": "tc-15-rich-dialog confirm",
+                        onload: function($dialog) {
+
+                        },
+                        button: {
+                            '确定': function($btn, $dialog) {
+                                var config = {};
+                                for (var key in g_data.rs.data.host_config.rsp_header.config_value) {
+                                    if (key != headerKey)
+                                    {
+                                        config[key] = g_data.rs.data.host_config.rsp_header.config_value[key];
+                                    }
+                                }
+                                setHostList({
+                                    host_id: g_data.hostid,
+                                    host_config: {
+                                        rsp_header: {
+                                            config_value: Object.keys(config).length > 0 ? config : ''
+                                        }
+                                    }
+                                }, function(rs) {
+                                    tips.success("http header删除成功！");
+                                    g_data.rs.data.host_config.rsp_header.config_value = config;
+                                    var data = [];
+                                    for (var key in config)
+                                    {
+                                        data.push({
+                                            header: key,
+                                            setting: config[key]
+                                        })
+                                    }
+                                    headTable.setData({
+                                        totalNum : 0,
+                                        page : 1,
+                                        count : 10,
+                                        list :data,
+                                        type:'reload'
+                                    });
+                                    $('[_dn_action="http_header_modify"]').show();
+                                    if (data.length == 0) {
+                                        $('[_dn_cdn_action="no_header_tip"]').show();
+                                        headTable._$el.hide();
+                                    }
+
+                                }, function(rs) {
+                                    tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                                });
+                                dialog.hide();
+                            }
+                        }
+                    });
+                }
+            },
+            $data : {
+                canSelectTotal : true,// 是否允许所有项
+                emptyTips : '抱歉，没有找到相关数据。', // 列表为空时的提示,
+                // 表头/列配置
+                colums : headTableColumn,
+                maxHeightOffset : 10,// 最大高度的偏移值
+                hasFirst: false,
+                height: "auto",
+                maxHeight: 324,
+                showPagination: false,
+                showState: false,
+                showPagination: false // 是否显示分页 
+            },
+            getCellContent: function(val, item, col) {
+                var res = val;
+                var aClass;
+                if (col) {
+                    if(col.key=='operation'){
+                        if (g_data.rs.data.can_modify)
+                        {
+                            aClass = "able";
+                        }
+                        else {
+                            aClass = "disable";
+                        }
+                        return '<div><span class="text-overflow"><a href="#" class="' + aClass + '" _dn_cdn_action="modify" _dn_cdn_data="' + item.header + '">修改</a><i class="black-seperate-line-icon" role="separator"></i><a href="#" class="' + aClass + '" _dn_cdn_action="delete" _dn_cdn_data="' + item.header + '">删除</a></span></div>';
+                    }
+                    else if (col.key=='setting') {
+                        return '<div><span class="text-overflow" title="' + cdnUtil.encodeHTML(res) + '">' + cdnUtil.escapeHTML(res) + '</span></div>';
+                    }
+                }
+                return '<span class="text-overflow">' +res+ '</span>';
+            }
+        });
+
+        headTable.setData({
+            totalNum : 0,
+            page : 1,
+            count : 10,
+            list :[],
+            type:'reload'
+        });
+        return headTable;
+    }
+
+    // 针对 dialog 库的确认按钮开关
+    function enableSubmit($dialog, flag) {
+        var $submitBtn = $dialog.find('.dialog_layer_ft .btn').eq(0);
+        if (flag) {
+            $submitBtn.removeClass('btn_unclick').addClass('btn_blue')
+        } else {
+            $submitBtn.removeClass('btn_blue').addClass('btn_unclick')
+        }
+    }
+
+    var isReferShowMore = false;
+    function renderLinkProtect(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+        var _render = function(referList) {
+            var itemListStr = tmpl.parse(g_Template.refer_item_list, {
+                refer: {list: referList},
+                can_modify: rsData.can_modify
+            });
+
+            container.find('[_dn_data="refer_item_list"]').html(itemListStr)
+            $showMore = container.find('[_dn_action="refer_show_more"]')
+        };
+
+        if (rsData.refer.type == 0) {
+            container.find('[_dn_data="no_refer_list"]').show();
+            container.find('[_dn_data="black_no_refer_list"]').hide();
+            container.find('[_dn_data="white_no_refer_list"]').hide();
+            container.find('[_dn_data="refer_list_table"]').hide();
+        }else if (rsData.refer.type == 1 && rsData.refer.list.length === 0) {
+            container.find('[_dn_data="black_no_refer_list"]').show();
+            container.find('[_dn_data="white_no_refer_list"]').hide();
+            container.find('[_dn_data="no_refer_list"]').hide();
+            container.find('[_dn_data="refer_list_table"]').hide();
+        }else if (rsData.refer.type == 2 && rsData.refer.list.length === 0) {
+            container.find('[_dn_data="white_no_refer_list"]').show();
+            container.find('[_dn_data="black_no_refer_list"]').hide();
+            container.find('[_dn_data="no_refer_list"]').hide();
+            container.find('[_dn_data="refer_list_table"]').hide();
+        } else {
+            container.find('[_dn_data="refer_list_table"]').show();
+            container.find('[_dn_data="black_no_refer_list"]').hide();
+            container.find('[_dn_data="white_no_refer_list"]').hide();
+            container.find('[_dn_data="no_refer_list"]').hide();
+
+            var protectType = (function () {
+                if (rsData.refer.type == 1) {
+                    return '黑名单'
+                } else if (rsData.refer.type == 2) {
+                    return '白名单'
+                }
+            })();
+            container.find('[_dn_data="refer_black_or_white"]').text(protectType)
+
+            var referList = rsData.refer.list;
+            var $showMore;
+
+            if (referList.length <= 5 || isReferShowMore) {
+                _render(referList)
+                $showMore.hide()
+            } else {
+                _render(referList.slice(0, 5))
+                $showMore.show();
+                $showMore.click(function (e) {
+                    isReferShowMore = true;
+                    _render(referList)
+                    $showMore.hide();
+                })
+            }
+        }
+    }
+
+    var isIpShowMore = false;
+    function renderIpProtect(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+        var _render = function(ipList) {
+            var itemListStr = tmpl.parse(g_Template.ip_item_list, {
+                ip_cc: {list: ipList},
+                can_modify: rsData.can_modify
+            });
+
+            container.find('[_dn_data="ip_item_list"]').html(itemListStr)
+            $showMore = container.find('[_dn_action="ip_show_more"]')
+        };
+
+        if (rsData.host_config.ip_cc.config_value.type == 0) {
+            container.find('[_dn_data="no_ip_list"]').show();
+            container.find('[_dn_data="ip_list_table"]').hide();
+        } else {
+            container.find('[_dn_data="no_ip_list"]').hide();
+            container.find('[_dn_data="ip_list_table"]').show();
+
+            var protectType = (function () {
+                if (rsData.host_config.ip_cc.config_value.type == 1) {
+                    return '黑名单'
+                } else if (rsData.host_config.ip_cc.config_value.type == 2) {
+                    return '白名单'
+                }
+            })();
+            container.find('[_dn_data="ip_black_or_white"]').text(protectType)
+
+            var ipList = rsData.host_config.ip_cc.config_value.list;
+            var $showMore;
+
+            if (ipList.length <= 5 || isIpShowMore) {
+                _render(ipList)
+                $showMore.hide()
+            } else {
+                _render(ipList.slice(0, 5))
+                $showMore.show();
+                $showMore.click(function (e) {
+                    isIpShowMore = true;
+                    _render(ipList)
+                    $showMore.hide();
+                })
+            }
+        }
+    }
+
+    function addSeoEvent(container) {
+        container.find('[_dn_data="seo_switch"]').change(function (e) {
+            var $this = $(this);
+
+            var seo;
+            if ($this.prop('checked')) {
+                seo = "on";
+            } else {
+                seo = "off";
+            }
+
+            setHostList({
+                host_id: g_data.hostid,
+                seo: seo
+            }, function(rs) {
+                tips.success("修改SEO优化配置成功！");
+                g_data.rs.data.seo = seo;
+            }, function(rs) {
+                // 失败恢复原状
+                $this.prop('checked', !$this.prop('checked'));
+            });
+        })
+    }
+
+    function addLinkProtectEvent(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        container.find('[_dn_action="modify_link_protect"]').click(function () {
+
+            var $dialog = dialog.create(g_Template.modify_refer_dialog, '484', '', {
+                title: '修改防盗链配置',
+                "class": "dialog_layer_v2 shutdown-cdn",
+                onload: function ($dialog) {
+                    var emptyReferInput = $dialog.find('[_dn_data="empty_refer_input"]')
+                    var referListInput = $dialog.find('[_dn_data="refer_list_input"]')
+                    referListInput.placeholder();
+                    var referLeft = $dialog.find('[_dn_data="modify_refer_left_count"]')
+
+                    $dialog.find('[name="refer_type"]').change(function (e) {
+                        var $this = $(this);
+
+                        var typeValue = $this.val();
+
+                        if (typeValue == 1) {
+                            emptyReferInput.closest('label').show();
+                            $('.bubble_black').show()
+                            $('.bubble_white').hide()
+                        } else if (typeValue == 2) {
+                            emptyReferInput.closest('label').show();
+                            $('.bubble_white').show()
+                            $('.bubble_black').hide()
+
+                        }
+                    })
+
+                    referListInput.keyup(function (e) {
+                        var $this = $(this);
+                        var lines = trimMultiline($this.val());
+
+                        var flag = true;
+
+                        lines.forEach(function (line) {
+                            if(lines.length === 1 && line === '') {
+                                return false;
+                            }
+
+                            if (!cdnUtil.testDomain(line) && !cdnUtil.testIp(line)) {
+                                flag = false;
+                            }
+                        })
+
+                        if (!lines[0]) {
+                            updateReferLeft(400)
+                        } else {
+                            updateReferLeft(400 - lines.length)
+                        }
+                        enableSubmit($dialog, flag);
+                    })
+
+                    function updateReferLeft(count) {
+                        referLeft.text(count)
+                    }
+
+                    var userReferType = rsData.refer.type == 0 ? 2 : rsData.refer.type;
+
+                    $dialog.find('[name="refer_type"][value=' + userReferType + ']').prop('checked', true).change();
+                    emptyReferInput.prop('checked', rsData.refer.null_flag)
+                    referListInput.val(rsData.refer.list.join('\n'))
+                    referListInput.keyup()
+                },
+                button: {
+                    '确认': function ($btn, $dialog) {
+
+                        var $emptyReferInput = $dialog.find('[_dn_data="empty_refer_input"]')
+                        var $referListInput = $dialog.find('[_dn_data="refer_list_input"]')
+                        var $referType = $dialog.find('[name="refer_type"]:checked')
+
+                        //console.log('refer', $emptyReferInput.prop('checked'), $referListInput.val(), $referType.val())
+
+                        var allowEmpty = $emptyReferInput.prop('checked') ? 1 : 0
+                        var referList = $referListInput.val().split(/\n+/);
+                        referList = _.compact(referList);
+                        for (var i = 0; i < referList.length; i++) {
+                            referList[i] = $.trim(referList[i]);
+                        }
+                        var referType = parseInt($referType.val());
+
+
+                        var referData = {
+                            "list": referList,
+                            "type": referType,
+                            "null_flag": allowEmpty
+                        }
+
+
+                        // 白名单的list为空时且null_flag为0 type设成0
+                        // 黑名单的list为空时且null_flag为0 type设成0
+                        if (referList.length == 0 && referType === 2 && allowEmpty === 0) {
+                            referData.type = 0;
+                        }else if(referList.length == 0 && referType === 1 && allowEmpty === 0) {
+                            referData.type = 0;
+                        }
+
+                        // type为0时 不传null_flag字段
+                        if (referData.type === 0) {
+                            delete referData.null_flag;
+                        }
+
+                        setHostList({
+                            host_id: hostid,
+                            refer: JSON.stringify(referData),
+                        }, function (rs) {
+
+                            rsData.refer = referData;
+                            tips.success('修改防盗链设置成功');
+                            dialog.hide();
+
+                            renderLinkProtect(container)
+                            addLinkProtectEvent(container)
+                        })
+                    }
+                }
+            })
+        })
+    }
+
+    function addIpProtectEvent(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        container.find('[_dn_action="modify_ip_protect"]').click(function () {
+
+            var $dialog = dialog.create(g_Template.modify_ip_dialog, '514', '', {
+                title: '修改IP黑白名单配置',
+                "class": "dialog_layer_v2 shutdown-cdn",
+                onload: function ($dialog) {
+                    var ipListInput = $dialog.find('[_dn_data="ip_list_input"]')
+                    ipListInput.placeholder();
+                    var ipLeft = $dialog.find('[_dn_data="modify_ip_left_count"]')
+
+
+                    ipListInput.keyup(function (e) {
+                        var $this = $(this);
+                        var lines = trimMultiline($this.val());
+
+                        var flag = true;
+
+                        lines.forEach(function (line) {
+                            if(lines.length === 1 && line === '') {
+                                return false;
+                            }
+
+                            if(line.indexOf('/') > -1) {
+                                var reg = /^(8|16|24|32)$/;
+                                if(!cdnUtil.testIp(line.split('/')[0]) || !reg.test(line.split('/')[1])) {
+                                    flag = false
+                                }
+                            }else {
+                                if (!cdnUtil.testIp(line)) {
+                                    flag = false;
+                                }
+                            }
+                        })
+
+                        if (!lines[0]) {
+                            updateIpLeft(100)
+                        } else {
+                            updateIpLeft(100 - lines.length)
+                        }
+                        enableSubmit($dialog, flag);
+                    })
+
+                    function updateIpLeft(count) {
+                        ipLeft.text(count)
+                    }
+
+                    var userIpType = rsData.host_config.ip_cc.config_value.type == 0 ? 2 : rsData.host_config.ip_cc.config_value.type;
+
+                    $dialog.find('[name="ip_type"][value=' + userIpType + ']').prop('checked', true).change();
+                    ipListInput.val(rsData.host_config.ip_cc.config_value.list.join('\n'))
+                    ipListInput.keyup()
+                },
+                button: {
+                    '确认': function ($btn, $dialog) {
+
+                        var $ipListInput = $dialog.find('[_dn_data="ip_list_input"]')
+                        var $ipType = $dialog.find('[name="ip_type"]:checked')
+
+                        var ipList = $ipListInput.val().split(/\n+/)
+                        ipList = _.compact(ipList)
+                        for (var i = 0; i < ipList.length; i++) {
+                            ipList[i] = $.trim(ipList[i]);
+                        }
+                        var ipType = parseInt($ipType.val());
+
+
+                        var ipData = {
+                            "list": ipList,
+                            "type": ipType
+                        }
+
+
+
+                        if (ipList.length == 0) {
+                            ipData.type = 0;
+                        }
+
+                        setHostList({
+                            host_id: hostid,
+                            host_config: {
+                                ip_cc: {
+                                    config_value: ipData
+                                }
+                            }
+                        }, function (rs) {
+
+                            rsData.host_config.ip_cc.config_value = ipData;
+                            tips.success('修改IP黑白名单设置成功');
+                            dialog.hide();
+
+                            renderIpProtect(container)
+                        })
+                    }
+                }
+            })
+        })
+    }
+
+    function addMiddleSourceEvent(container) {
+        container.find('[_dn_data="middle_source_switch"]').change(function (e) {
+            var $this = $(this);
+
+            var middle_resource;
+            if ($this.prop('checked')) {
+                middle_resource = 1
+            } else {
+                middle_resource = -1
+            }
+
+
+
+            setHostList({
+                host_id: g_data.hostid,
+                middle_resource: middle_resource
+            }, function(rs) {
+                tips.success("修改中间源设置成功！");
+
+                g_data.rs.data.middle_resource = middle_resource;
+            }, function(rs) {
+                // 失败恢复原状
+                $this.prop('checked', !$this.prop('checked'));
+            });
+        })
+    }
+
+    function addErrorTip(msg, classNames) {
+
+        var errorTip = $(g_Template.error_tip).addClass(classNames);
+
+        errorTip.find('.msg-span').html(msg);
+
+        g_container.find('[_dn_data="error_area"]').append(errorTip);
+    }
+
+    function addSuccessTip(msg, classNames) {
+
+        var successTip = $(g_Template.success_tip).addClass(classNames);
+
+        successTip.find('.msg-span').html(msg);
+
+        g_container.find('[_dn_data="error_area"]').append(successTip);
+    }
+
+    function getBucketNames(projectId) {
+        dao.get_bucket_list({
+            data: {
+                project_id: projectId
+            },
+            success: {
+                0: function (rs) {
+                    var project_list = rs.data.project_list
+
+                    g_data.project_list = project_list
+                },
+                default: function (rs) {
+                    tips.error(rs.msg)
+                }
+            }
+        })
+    }
+
+    function getHostInfo(hostid) {
+        var hostDeferred = $.Deferred();
+        var listDeferred = $.Deferred();
+
+        dao.getHostInfo({
+            data: {
+                host_id: hostid
+            },
+            success: {
+                "0": function(rs) {
+
+                    if(!rs.data.host_config.ip_cc.config_value.list) {
+                        rs.data.host_config.ip_cc.config_value = {
+                            type: 0,
+                            list: []
+                        }
+                    }
+
+                    g_data.rs = rs;
+                    g_data.hostid = hostid;
+
+                    if (rs.data.host_type == 'cos') {
+                        var projectId = rs.data.project_id;
+                        getBucketNames(projectId)
+                    }
+
+                    hostDeferred.resolve(rs);
+                },
+                "default": function(rs) {
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                    }
+                }
+            }
+        });
+
+        dao.getProjectList({
+            data: {field: "set"},
+            success: {
+                0: function(rs) {
+                    g_data.projects = rs.data.projects;
+                    listDeferred.resolve(rs);
+                },
+                "default": function(rs) {
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                    }
+                }
+            }
+        })
+
+        $.when(hostDeferred, listDeferred).done(function (hostRs, listRs) {
+
+            // 整理数据
+            hostRs.data.cname = hostRs.data.cname || "";
+            hostRs.data.origin = hostRs.data.origin.split(";")
+            var project = _.find(listRs.data.projects, function(item) {
+                return item.id == hostRs.data.project_id;
+            });
+            if (!project) {
+                project = {}
+            }
+            hostRs.data.project = project;
+            hostRs.data.bucket_name = hostRs.data.bucket_name + "(" + hostRs.data.bucket_project_name + ")";
+
+            // hostRs.data.show_projects = listRs.data.show_projects;
+
+            /**
+             * if (m.status == "0") { m.statusText = "待认证" } else if (m.status == "1") { m.statusText = "审核中" } else if (m.status == "4") { m.statusText = "部署中" } else if (m.status ==
+             * "5") { m.statusText = "已启动" } else if (m.status == "6") { m.statusText = "已关闭" } else if (m.status == "2") { m.statusText = "审核未通过" }  8  未知
+             */
+            hostRs.data.already_start = hostRs.data.status == 4 || hostRs.data.status == 5 || hostRs.data.status == 8;
+            hostRs.data.can_modify = hostRs.data.already_start && !hostRs.data.readonly;
+
+            if (hostRs.data.host_type == "cname") {
+                hostRs.data.host_type_txt = "自有源";
+            } else if (hostRs.data.host_type == "ftp") {
+                hostRs.data.host_type_txt = "ftp托管源";
+            } else if (hostRs.data.host_type == 'cos') {
+                hostRs.data.host_type_txt = "COS源";
+            }
+
+            hostRs.data.service_type_txt = "";
+            if (hostRs.data.service_type == "web") {
+                hostRs.data.service_type_txt = "静态加速";
+            }
+            else if (hostRs.data.service_type == "download") {
+                hostRs.data.service_type_txt = "下载加速";
+            }
+            else if (hostRs.data.service_type == "media") {
+                hostRs.data.service_type_txt = "流媒体加速";
+            }
+
+            // END 整理数据
+
+            showMainPage();
+        })
+    }
+
+    function showFtpInfo(container) {
+        var rsData = g_data.rs.data;
+        var hostid = g_data.hostid;
+
+        if (rsData.host_type != 'ftp' || !rsData.already_start) {
+            return;
+        }
+
+        getFtpInfo(hostid, function (ftpData) {
+            var ftpInfoStr = tmpl.parse(g_Template.ftp_detail, {
+                total: ftpData.ftp_total_size_str,
+                used: ftpData.ftp_used_size_str,
+                used_precent: ftpData.used_precent,
+            })
+
+            container.find('[_dn_data="ftp_detail"]').html(ftpInfoStr)
+        })
+    }
+
+    var g_ftpDataCache;
+    function getFtpInfo(hostid, fn) {
+        if (g_ftpDataCache) {
+            return fn(g_ftpDataCache)
+        }
+        dao.getFtpInfo({
+            data: {
+                host_id: hostid
+            },
+            success: {
+                "0": function(rs) {
+                    var data = rs.data;
+                    var total = data.quota_size;
+                    var left = data.quota_left;
+                    data.ftp_total_size_str = formatFileSize(total * 1024, 'flux');
+                    data.ftp_left_size_str = formatFileSize(left * 1024, 'flux');
+                    data.ftp_used_size_str = formatFileSize((total - left) * 1024, 'flux');
+                    data.used_precent = (total - left) / total
+
+                    g_ftpDataCache = data;
+
+                    fn(data);
+
+                },
+                "default": function(rs) {
+                    if (rs.msg) {
+                        tips.error(rs.msg);
+                    } else {
+                        tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * 转换单位
+     *
+     */
+    function formatFileSize(val, pay_type, len) {
+        len = len || 2;
+        pay_type = pay_type || "bandwidth";
+        if (pay_type == "flux") {
+            var txt = "B";
+        } else {
+            var txt = "bps";
+        }
+        //bytes
+        if (val < 1024) {
+            return val + txt;
+        } else if ((val = val / 1024) < 1024) { //kb
+            return val.toFixed(len) + "K" + txt;
+        } else if ((val = val / 1024) < 1024) { //mb
+            return val.toFixed(len) + "M" + txt;
+        } else if ((val = val / 1024) < 1024) { //gb
+            return val.toFixed(len) + "G" + txt;
+        } else if ((val = val / 1024) < 1024) { //tb
+            return val.toFixed(len) + "T" + txt;
+        } else { //tb
+            return val.toFixed(len) + "T" + txt;
+        }
+    }
+
+    return {
+        render: function (hostid) {
+            g_container = $('[_dn_data="container"]')
+
+            isReferShowMore = false; // 防盗链，重置展开按钮的状态
+            isIpShowMore = false; // Ip黑白名单，重置展开按钮的状态
+
+            getHostInfo(hostid)
+        },
+        destroy: function () {
+            clearInterval(g_updateInterval)
+        },
+        container: g_Template.container,
+    }
+});/*  |xGv00|d83d0456f4240f7bba09f828314035c3 */

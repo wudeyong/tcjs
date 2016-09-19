@@ -1,0 +1,1322 @@
+// 开通服务页面
+/**
+ */
+define(function(require, exports, module) {
+	var $ = require("cdn/$");
+	var dao = require("cdn/data/dao");
+	var guidestepTemplate = require("../../templates/guidestep.html.js");
+	var $guidestepTemplate = $(guidestepTemplate);
+	var tmpl = require("cdn/lib/tmpl");
+	var dialog = require("cdn/dialog");
+	var router = require("cdn/router");
+	var cdnutil = require('cdn/lib/util');
+	var tips = require('cdn/tips');
+	var regionSelector = require('cdn/regionSelector');
+	var dropdown = require('cdn/dropdown');
+	var yaCdnUtil = require('cdn/util');
+
+	// 抽取出每个步骤对应的页面
+	var setp1 = $guidestepTemplate.filter("#step1").html();
+	var setp2 = $guidestepTemplate.filter("#step2").html();
+	var setp3 = $guidestepTemplate.filter("#step3").html();
+	var step4 = $guidestepTemplate.filter("#step4").html();
+	var qiniuTmpl = $guidestepTemplate.filter("#dialog_qiniu").html();
+	var workOrderTmpl = $guidestepTemplate.filter("#dialog_work_order").html();
+	var deleteDomainTmpl = $guidestepTemplate.filter("#dialog_delete_domain").html();
+	var repeatDomainVerifyTipTmpl = $guidestepTemplate.filter("#repeat_domain_verify_tip").html();
+	var cosBucketSelectTmpl = $guidestepTemplate.filter("#cos_bucket_select").html();
+	
+	var cachetr = $guidestepTemplate.filter("#cachetr").find("tbody").html();
+	var defaultCachetr = $guidestepTemplate.filter("#defaultCachetr").find("tbody").html();
+	var domainTr = $guidestepTemplate.filter("#domain_input").html();
+	var appid = $.cookie("cdn_appid");
+    var stepElement = {};
+
+    // 为了不让 keyup 事件频繁调用 checkHost. 设置一个延迟
+    var checkHostTimeout = null;
+
+    // 接入方式
+    var hostTypeValue = 1;
+
+	function delDomain() {
+		$(this).parent().remove();
+		if ($(".step1").find(".domaintmpl").length > 1) {
+			$(".step1").find(".domaintmpl").find("[data-event=deldomain]").show();
+		} else {
+			$(".step1").find(".domaintmpl").find("[data-event=deldomain]").eq(0).hide();
+		}
+		
+		if($(".step1").find(".domaintmpl").length<10){
+			$(".step1").find("[data-event=adddomain]").show();
+		}
+	}
+
+	function changeBusinessType() {
+		new dropdown($(".step1").find('.ui-dropdown[_dn_cdn_action="business_select"]'), {
+			buttonObj : $(".step1").find('.ui-dropdown[_dn_cdn_action="business_select"]').find('.btn-link')
+		}).click(function(li) {
+			var typeId = $(li).data("val");
+			$(".step1").find('.ui-dropdown[_dn_cdn_action="business_select"]').find(".txt").text($(li).text()).attr("data-val", typeId);
+		});
+	}
+
+	function changeSourceType() {
+		new dropdown($(".step1").find('.ui-dropdown.projectselect'), {
+			buttonObj : $(".step1").find('.ui-dropdown.projectselect')
+					.find('.btn-link')
+		}).click(function(li) {
+			var projectId = $(li).data("value");
+			$(".step1").find('.ui-dropdown.projectselect').find(".txt").text($(li).text()).attr("data-val", projectId);
+			$(".step1").find(".ftplink").text("ftp://ftp.cdn.qcloud.com/" + appid + "/" + $(li).data("value"))
+		});
+	}
+
+	function changeBucketDropdown() {
+		dao.get_bucket_list({
+			success: {
+				0: function (rs) {
+					var project_list = rs.data.project_list;
+					var bucketHtml;
+
+					if (project_list.length > 0) {
+
+						$(".step1").find('.bucketselect').closest('.cos').find('.error-tips').removeClass('checkerror').hide();
+						$(".step1").find('.cos-desc').hide();
+						bucketHtml = tmpl.parse(cosBucketSelectTmpl, {project_list: project_list});
+
+						$(".step1").find('[_dn_cdn_action="bucketselect_span"]').html(bucketHtml);
+
+						initBucketDropdown();
+					} else {
+						$(".step1").find('[_dn_cdn_action="bucketselect_span"]').html('无bucket选择<span class="cos-desc">还没有云对象存储空间？请到<a href="http://console.qcloud.com/cos" target="_blank">云对象存储</a>创建空间</span>')
+					}
+				},
+				default: function (rs) {
+					tips.error(rs.msg)
+				}
+			}
+		});
+
+	}
+	function initBucketDropdown() {
+		// 下拉框选择事件
+		$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel]').off('click').on("click", function(e) {
+			var target = $(e.target);
+			var value = target.data("value");
+			var text = target.text();
+			var project_id = target.data("id");
+			if (project_id == undefined)
+			{
+				return;
+			}
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_input]').val(text);
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_input]').data("val", value);
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_input]').data("id", project_id);
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_input]').removeClass("checkerror");
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel]').toggle();
+		});
+		// 初始化下拉框收缩事件
+		$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_up_down]').off('click').on("click", function(e) {
+			// 主动操控css规避dropdown的bug
+			$(".step1").find('.bucketselect').addClass("tc-15-menu-active");
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel]').toggle();
+		});
+		// 输入搜索事件
+		$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_input]').off('keyup').on("keyup", function(e) {
+			// 主动操控css规避dropdown的bug
+			$(".step1").find('.bucketselect').addClass("tc-15-menu-active");
+			$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel]').show();
+			var value = $.trim($(e.target).val());
+			if (!value)
+			{
+				$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel] li[data-value]').show();
+				$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_input]').addClass("checkerror");
+			}
+			else {
+				$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel] li[data-value]').hide();
+				$(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel] li[data-value*="' + value + '"]').show();
+			}
+			if ($(".step1").find('.bucketselect').find('[_dn_cdn_bucket_select_panel] li[data-value*="' + value + '"]').length == 0) {
+				$(".step1").find('.bucketselect').find('[_dn_cdn_no_result]').show();
+			}
+			else {
+				$(".step1").find('.bucketselect').find('[_dn_cdn_no_result]').hide();
+			}
+
+		});
+	}
+
+	// 初始化验证块的dom节点事件,入参为$(".domaintmpl")
+	function initVerifyBtn($this) {
+		// 输入框
+		var $input = $this.find('input');
+		// 验证方法tip块
+		var $verifyTips = $this.find('.verify-tips');
+		// 验证按钮
+		var $verifyBtn = $this.find('[_dn_action=verify_wildcard]');
+		// 验证错误友情提示
+		var $verifyConflicts = $this.find('[_dn_action=verify-conficts]');
+		// 验证错误tip
+		var $error_verify_result = $this.find('[_dn_cdn_action=verify_result]');
+		// 错误提示块
+		var $errorTips = $this.find('[_dn_cdn_action=error_tips]');
+
+		// 同一个按钮两种验证场景，1是泛域名权限验证，2是普通域名收回权限验证
+		var $domainReclaimVerify = $this.find('[_dn_cdn_action=domain_reclaim_verify]');
+		var $domainAuthorityVerify = $this.find('[_dn_cdn_action=domain_authority_verify]');
+
+		// 收缩按钮
+		var $collapsePanel = $("[_dn_cdn_action='collapse_panel']");
+		// 转菊花图标
+		var $loadingIcon = $this.find('[_dn_cdn_action="loading"]');
+
+		$verifyTips.find('[_dn_action="download_verify_wildcard_file"]').attr('href', 'https:' + CDN.FormSender.serverUrl + '/ajax/api.php?action=get_test_file&g_tk=' + yaCdnUtil.getACSRFToken());
+
+		// 检查用户是否上传文件成功
+		$verifyBtn.off('click.check_test_file').on('click.check_test_file', function (e) {
+			// 显示转菊花图标
+			$loadingIcon.removeClass('hide');
+			if (!$domainReclaimVerify.hasClass('hide')) {
+				// 域名
+				var host = $input.val();
+				dao.check_reclaim_host({
+					showLoadingIcon: false,
+					data: {
+						host: host
+					},
+					success: {
+						0: function(rs) {
+							// 隐藏转菊花图标
+							$loadingIcon.addClass('hide');
+							dialog.create(deleteDomainTmpl, '550', '', {
+								title: '域名管理权限验证',
+								preventResubmit: true,
+								"class": "dialog_layer_v2 shutdown-cdn",
+								button: {
+									'确定': function() {
+										dialog.hide();
+										dao.reclaim_host({
+											data: {
+												host:host
+											},
+											success: {
+												0:function(rs) {
+													// 显示继续添加按钮
+													showAddDomain(true);
+													$errorTips.addClass("hide");
+													$input.removeClass("checkerror");
+													$input.parent().addClass("succeed");
+												}
+											},
+											default: function(rs) {
+												tips.error(rs.msg);
+											}
+										});
+									}
+								},
+							});
+						},
+						default: function(rs) {
+							// 隐藏转菊花图标
+							$loadingIcon.addClass('hide');
+							// 隐藏验证不成功tip
+							$error_verify_result.addClass("hide");
+							if (rs.code == 9139) {
+								dialog.create(qiniuTmpl, '550', '', {
+									title: '域名管理权限验证',
+									preventResubmit: true,
+									"class": "dialog_layer_v2 shutdown-cdn",
+									button: {
+										'知道了': function() {
+											dialog.hide();
+										}
+									},
+									defaultCancelBtn:false
+								});
+							}
+							else if (rs.code == 9143){
+								dialog.create(workOrderTmpl, '550', '', {
+									title: '域名管理权限验证',
+									preventResubmit: true,
+									"class": "dialog_layer_v2 shutdown-cdn",
+									button: {
+										'提交工单': function() {
+											window.open("http://console.qcloud.com/ticket");
+											dialog.hide();
+										}
+									}
+								});
+							}
+							else if (rs.code == 9140){
+								$error_verify_result.text("验证不成功，请确认是否已经正确上传。")
+								$error_verify_result.removeClass("hide");
+							}
+							else if (rs.code == 9144){
+								$error_verify_result.text("该域名已经被封禁，暂时不允许取回。")
+								$error_verify_result.removeClass("hide");
+							}
+						}
+					}
+				});
+			}
+			else {
+				dao.check_wildcard_host({
+					data: {
+						host: $(this).parents(".domaintmpl").find("input").val()
+					},
+					success: {
+						0: function (rs) {
+							// 隐藏转菊花图标
+							$loadingIcon.addClass('hide');
+							$verifyTips.hide();
+							$errorTips.addClass("hide");
+							$input.removeClass("checkerror");
+
+							tips.success('验证成功!')
+
+							$(".step1").find(".domaininput").prop('disabled', true);
+
+							if (!_.isEmpty(rs.data.notice) && !_.isEmpty(rs.data.conflicts)) {
+								$verifyConflicts.show();
+								var noticeHosts = [];
+								var conflictsHosts = [];
+								rs.data.notice.forEach(function(item, index) {
+									noticeHosts.push(item.host);
+								});
+								rs.data.conflicts.forEach(function(item, index) {
+									conflictsHosts.push(item.host);
+								});
+								$verifyConflicts.find('[_dn_action="verify-conficts-msg"]').html('检测到同一域名下的其他接入，<br>同一账户下：' + noticeHosts.join(',') + '，<br>不同账户下：' + conflictsHosts.join(',') + '。<br>其中，不同账户下的记录将失效。');
+							}
+						},
+						default: function (rs) {
+							// 隐藏转菊花图标
+							$loadingIcon.addClass('hide');
+							tips.error('检测不成功，请确认已经上传。');
+							if (rs.code == 9140){
+								$error_verify_result.text("验证不成功，请确认是否已经正确上传。");
+							}
+							else if (rs.code == 9144){
+								$error_verify_result.text("该域名已经被封禁，暂时不允许取回。");
+							}
+							$error_verify_result.removeClass("hide");
+							$input.addClass("checkerror");
+						}
+					}
+				});
+			}
+			return false;
+		});
+
+		// 验证面板显隐操作
+		$collapsePanel.on("click", function(e) {
+			var downIcon = $(this).find(".blue-down-icon");
+			var upIcon = $(this).find(".blue-up-icon");
+			if (downIcon.hasClass("hide"))
+			{
+				downIcon.removeClass("hide");
+				upIcon.addClass("hide");
+				$verifyTips.addClass("hide");
+			}
+			else {
+				downIcon.addClass("hide");
+				upIcon.removeClass("hide");
+				$verifyTips.removeClass("hide");
+			}
+		});
+
+		$(".step1").find(".domaininput").keyup(checkDomain);
+		$(".step1").find("[data-event=deldomain]").click(delDomain).hide();
+	}
+
+	// 初始化继续添加按钮的点击事件
+	function initAddDomainInputEvent() {
+		$(".step1").find("[data-event=adddomain]").click(function() {
+			var s = $(domainTr);
+			// 初始化删除按钮事件
+			s.find("[data-event=deldomain]").click(delDomain);
+			// 加入dom结构
+			$(".step1").find(".domaintmpl").last().after(s);
+			// 初始化输入校验事件
+			s.find(".domaininput").keyup(checkDomain);
+			// 初始化验证块事件
+			initVerifyBtn(s)
+			$(".step1").find("[data-event=deldomain]").show();
+			if($(".step1").find(".domaintmpl").length>=10){
+				$(this).hide();
+			}
+		});
+	}
+
+	// 初始化接入方式点击事件
+	function initChangeSourceEvent() {
+		$(".step1").find("[data-event=changesource]").click(function() {
+			function hideAll() {
+				$(".step1").find(".source").hide();
+				$(".step1").find(".ftp").hide();
+				$(".step1").find(".cos").hide();
+
+			}
+
+			hideAll()
+
+			var v = $(".step1").find("[name=sourcemenu]:checked").val();
+			// 更新父作用域的变量值，后续很多地方会用到
+			hostTypeValue = v;
+			if (v == 1) {
+				$(".step1").find(".source").show();
+			} else if (v == 2) {
+				$(".step1").find(".ftp").show();
+			} else if (v == 3) {
+				$(".step1").find(".cos").show();
+			}
+		});
+	}
+
+	// 显隐继续添加按钮
+	function showAddDomain(flag) {
+		var addtips = $('[_dn_action=adddomain_tips]')
+		var button = $('[data-event=adddomain]')
+
+		var action = flag ? 'show' : 'hide';
+
+		addtips[action]();
+		button[action]();
+	}
+
+	// 校验域名
+	function checkDomain() {
+		var $this = $(this);
+		var domainValue = $this.val();
+		domainValue = $.trim(domainValue);
+
+		// 所有类型的错误tip
+		var $errorTips = $this.parent().find("[_dn_cdn_action='error_tips']");
+		var $errorTips_variable = $this.parent().find("[_dn_cdn_action='error_variable']");
+		var $errorTips_abc = $this.parent().find("[_dn_cdn_action='error_abc']");
+		var $errorTips_fanyuming = $this.parent().find("[_dn_cdn_action='error_*']");
+		var $errorTips_authority = $this.parent().find("[_dn_cdn_action='error_authority']");
+		var $errorTips_domain_authority_verify = $this.parent().find("[_dn_cdn_action='domain_authority_verify']");
+		var $errorTips_domain_reclaim_verify = $this.parent().find("[_dn_cdn_action='domain_reclaim_verify']");
+		var $verifyTips = $this.parent().find('.verify-tips');
+		var $error_verify_result = $this.parent().find("[_dn_cdn_action='verify_result']");
+
+		var $downIcon = $this.parent().find(".blue-down-icon");
+		var $upIcon = $this.parent().find(".blue-up-icon");
+
+		// 转菊花图标
+		var $loadingIcon = $this.parent().find('[_dn_cdn_action="loading"]');
+		// 整个输入块的父div
+		var $domaintmplDiv = $this.parent();
+
+		// 为了不让 keyup 事件频繁调用 checkHost. 设置一个延迟
+		if (checkHostTimeout) {
+			clearTimeout(checkHostTimeout);
+		}
+
+		if (domainValue == "" || !cdnutil.testDomain(domainValue)) {
+			showHideInit();
+			$errorTips.removeClass("hide");
+			$errorTips_abc.removeClass("hide");
+			$this.addClass("checkerror");
+			$domaintmplDiv.removeClass("succeed");
+			return;
+		} 
+		// 以 *. 开头. 泛域名接入
+		else if (domainValue.indexOf('*.') === 0) {
+			// 说明已经校验过，直接返回
+			if ($this.prop("disabled")) {
+				return;
+			}
+			showHideInit();
+			$errorTips.removeClass("hide");
+
+			if ($(".step1").find(".domaininput").length > 1) {
+				$errorTips_fanyuming.removeClass("hide");
+				$this.addClass("checkerror");
+			}
+			else {
+				$errorTips_authority.removeClass("hide");
+				checkHost();
+			}
+			// 隐藏继续添加按钮
+			showAddDomain(false);
+			return;
+		}
+		else {
+			showHideInit();
+			$errorTips.addClass("hide");
+			// 显示继续添加按钮
+			showAddDomain(true);
+
+			checkHost();
+			return;
+		}
+
+		// 初始化dom节点显隐状态
+		function showHideInit() {
+			$errorTips.addClass("hide");
+			$errorTips_variable.addClass('hide');
+			$errorTips_abc.addClass("hide");
+			$errorTips_fanyuming.addClass("hide");
+			$errorTips_authority.addClass("hide");
+			$errorTips_domain_authority_verify.addClass("hide");
+			$errorTips_domain_reclaim_verify.addClass("hide");
+			$verifyTips.addClass("hide");
+
+			$downIcon.removeClass("hide");
+			$upIcon.addClass("hide");
+			$error_verify_result.addClass("hide");
+		}
+
+		function checkHost() {
+			checkHostTimeout = setTimeout(function () {
+				// 显示菊花图标
+				$loadingIcon.removeClass('hide');
+				// 移除成功图标
+				$domaintmplDiv.removeClass("succeed");
+				dao.check_host({
+					showLoadingIcon: false,
+					data: {
+						host: domainValue
+					},
+					success: {
+						0: function (rs) {
+							// 移除菊花图标
+							$loadingIcon.addClass('hide');
+							// 输入框取消变红
+							$this.css("border-color", "#d1d2d3");
+							showHideInit();
+
+							var host = rs.data.host;
+							var domain = rs.data.domain;
+							var testFileUrl = 'http://' + domain + '/qcloud_cdn.html';
+							$verifyTips.find('[_dn_action=verify_domain_tip]').text(rs.data.domain);
+							$verifyTips.find('[_dn_action="verify_wildcard_url"]').attr('href', testFileUrl);
+							$verifyTips.find('[_dn_action="verify_wildcard_url"]').text(testFileUrl);
+
+							// 判断是否泛域名，是则需要显示校验权限的tip
+							if (host.indexOf("*") === 0)
+							{
+								$errorTips.removeClass("hide");
+								$errorTips_domain_authority_verify.removeClass("hide");
+								$this.addClass("checkerror");
+								// 隐藏继续添加按钮
+								showAddDomain(false);
+							}
+							else {
+								// 显示成功图标
+								$domaintmplDiv.addClass("succeed");
+								// 显示继续添加按钮
+								showAddDomain(true);
+								$this.removeClass("checkerror");
+							}
+						},
+						default: function (rs) {
+							// 移除菊花图标
+							$loadingIcon.addClass('hide');
+
+							showHideInit();
+
+							var errMsgs = {
+								9092: '该域名已接入',
+								9141: '该泛域名已接入',
+								9395: '该域名已在大禹系统接入',
+								9142: '该泛域名已在大禹系统接入',
+								9137: '域名已被该账号添加过',
+								9138: '域名被他人接入',
+								20004: '域名未在工信部备案，无法接入'
+							};
+							var msg = errMsgs[rs.code] ? errMsgs[rs.code] : rs.msg;
+							// 9138需要进行权限校验，其他则直接显示错误tip即可
+							if (rs.code == 9138) {
+								var host = rs.data.host;
+								var domain = rs.data.domain;
+								var testFileUrl = 'http://' + domain + '/qcloud_cdn.html';
+								$verifyTips.find('[_dn_action=verify_domain_tip]').text(rs.data.domain);
+								$verifyTips.find('[_dn_action="verify_wildcard_url"]').attr('href', testFileUrl);
+								$verifyTips.find('[_dn_action="verify_wildcard_url"]').text(testFileUrl);
+								$errorTips.removeClass("hide");
+								$errorTips_domain_reclaim_verify.removeClass("hide");
+								// 隐藏继续添加按钮
+								showAddDomain(false);
+								// 输入框取消变红
+								$this.css("border-color", "#d1d2d3");
+							}
+							else {
+								// 显示错误tip
+								$errorTips.removeClass("hide");
+								$errorTips_variable.text(msg).removeClass("hide");
+								// 输入框变红
+								$this.css("border-color", "#e1504a");
+							}
+							$this.addClass("checkerror");
+						}
+					}
+				})
+			}, 1 * 1000);
+		}
+	}
+
+	function s1() {
+		$(".guidmain").hide();
+		if ($(".step1").length > 0) {
+			$(".step1").show();
+			return;
+		} else {
+			$(".guidcontainer").after(setp1);
+		}
+        $('textarea').focus(function() {
+            if(this.title==this.value) {
+                this.value = '';
+            }
+        });
+
+        // 添加第一个域名输入框
+        $(".step1").find("[_dn_cdn_action='domain_tmpl']").prepend(domainTr);
+        initVerifyBtn($(".domaintmpl"))
+
+        initAddDomainInputEvent();
+
+        initChangeSourceEvent();
+
+        changeBusinessType();
+
+        // changeHostType();
+
+        dao.get_permission({
+            success : {
+                "0" : function(rs) {
+                    if (rs.data && (rs.data.permission === "MANAGE_HUMAN_RESOURCE" || rs.data.permission === "MANAGE_CLOUD_RESOURCE"))
+                    {
+                        $(".step1 ._dn_action_permission").replaceWith('<a class="_dn_action_permission" href="/cdn/tools/account" target="_blank" style="padding: 0;margin: 0">自定制账号密码</a>');
+                    }
+                },
+                "default":function(rs){
+                    tips.error(rs.msg);
+                }
+            }
+        });  
+		dao.getProjectList({
+			data: {field: "add"},
+			"success" : {
+				"0" : function(rs) {
+					var projectHtml =[];
+					$(".step1").find('.ui-dropdown.projectselect').find(".txt")
+					  .text(rs.data.projects && rs.data.projects[0].info).attr("data-val", rs.data.projects[0].id);
+					$(".step1").find(".ftplink").text("ftp://ftp.cdn.qcloud.com/" + appid + "/" + rs.data.projects[0].id);
+					$(rs.data.projects).each(function(idx,project){
+							projectHtml.push('<li data-value="'+project.id+'">'+project.info+'</li>');
+					});
+				    $(".step1").find(".projectselect ul").html(projectHtml.join(""));
+					changeSourceType();
+
+					// cos bucket 的选择
+					changeBucketDropdown()
+					// END cos bucket 的选择
+
+					$(".step1 [_dn_action=cancel]").click(function(){
+						router.navigate("/cdn/access");
+					});
+					$(".step1").find("textarea").keyup(checkSource);
+					$(".step1").find(".next").click(function() {
+						// 触发校验
+						$(".step1").find(".checkitem").trigger("keyup");
+						var domainInput = $(".step1").find(".checkitem.domaininput.checkerror");
+						if (domainInput.length > 0)
+						{
+							domainInput.focus();
+							return;
+						}
+
+						var value = hostTypeValue;
+
+						if (value == 1) {
+							if ($(".step1").find(".checkerror").not(".cos .checkerror").length == 0) {
+								s2();
+							}
+						} else if (value == 2) {
+							if ($(".step1").find(".checkerror").not(".source .checkerror").not(".cos .checkerror").length == 0) {
+								s2();
+							}
+							else {
+								$(".step1").find('[_dn_cdn_bucket_input]').focus();
+							}
+						} else if (value == 3) {
+							if ($(".step1").find(".checkerror").not(".source .checkerror").length == 0) {
+								s2();
+							}
+						}
+						
+					});			
+				},
+				"default" : function(rs) {
+					if (rs.msg) {
+						tips.error(rs.msg);
+					} else {
+						tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+					}
+				}
+			}
+		});
+		// 校验ftp接入的权限
+		dao.get_white_list({
+			success : {
+			    "0" : function(rs) {
+			        if (rs.data.ftp && rs.data.ftp.value == "on") {
+			        	$('[_dn_cdn_action="ftp_authority"]').show();
+			        }
+			    },
+			    "default":function(rs){
+			        tips.error(rs.msg);
+			    }
+			}
+		});
+	}
+	// 点击下一步检测内容
+	function checkSource() {
+		var domains = [];
+		var cType = hostTypeValue;
+		var error = [];
+		var pError = false;
+		var port1 = /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.){1,}[a-zA-Z]{2,}(:([1-9]|[1-9]\d|[1-9]\d{2}|[1-9]\d{3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5]))?$/;
+		var port2 = /^((([0-9]?[0-9])|(1[0-9]{2})|(2[0-4][0-9])|(25[0-5]))\.){3}(([0-9]?[0-9])|(1[0-9]{2})|(2[0-4][0-9])|(25[0-5]))(:([1-9]|[1-9]\d|[1-9]\d{2}|[1-9]\d{3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5]))?$/;
+
+		// 判断是否内网ip，是内网返回false
+		/*
+			"10.0.0.0" => "10.255.255.255", 167772160 => 184549375
+            "127.0.0.0" => "127.255.255.255", 2130706432 => 2147483647
+            "172.16.0.0" => "172.31.255.255", 2886729728 => 2887778303
+            "192.168.0.0" => "192.168.255.255", 3232235520 => 3232301055
+		**/
+		var checkIntranet = function(ip) {
+			var ipSectionReg = /(\d+)/g;
+			var ipSection = ip.match(ipSectionReg);
+			var ipValue = +ipSection[0] * 16777216 + +ipSection[1] * 65536 + +ipSection[2] * 256 + +ipSection[3];
+			if ((ipValue >= 167772160 && ipValue <= 184549375) || (ipValue >= 2130706432 && ipValue <= 2147483647) || (ipValue >= 2886729728 && ipValue <= 2887778303) || (ipValue >= 3232235520 && ipValue <= 3232301055))
+			{
+				return false;
+			}
+			else {
+				return true;
+			}
+		};
+		
+		if (cType == 1) {
+			$(".step1").find(".domaininput").each(function() {
+				if ($.trim($(this).val()) != "") {
+					domains.push($(this).val());
+				}
+			});
+			var textarea = $(".step1").find("textarea").val().split(/\n/);
+			var domains = ";" + domains.join(";") + ";";
+			var originList = _.filter(textarea, function(item) {
+				item = $.trim(item);
+				if (item == "") {
+					return false;
+				}
+				if (!port1.test(item) && !(port2.test(item) && checkIntranet(item))) {
+					error.push(item);
+					return false;
+				}
+				return true
+			});
+			if (error.length > 0 || originList.length == 0) {
+				$(".step1").find("textarea").parent().find(".error-tips").html("可填写多个源站IP或IP:port,一行填写一个;只可填一个域名或域名:port;<br>端口大于0或小于等于65535;IP和域名不可混填;IP不能填内网IP").show();
+				$(".step1").find("textarea").addClass("checkerror");
+				var f = true;
+			} else {
+				// 获取第一个源站的类型，true则是域名，false则是ip
+				var first = port1.test(originList[0]);
+				var f = _.find(originList, function(item, i) {
+					// 判断域名跟源站是否一致
+					if (domains.indexOf(";" + item.split(":")[0] + ";") > -1) {
+						$(".step1").find("textarea").parent().find(".error-tips").text("您输入的加速域名与源站域名不能一致，请确认后重新提交").show();
+						return true;
+					}
+					// 判断源站是否混填
+					if (first != port1.test(item)) {
+						$(".step1").find("textarea").parent().find(".error-tips").text("您输入的源站IP与源站域名不能混填，请确认后重新提交").show();
+						return true;
+					}
+					if(originList.length > 1 && port1.test(item)) {
+						if(i === 0) {
+							return false
+						}
+						$(".step1").find("textarea").parent().find(".error-tips").text("只能输入一个源站域名").show();
+						return true;
+					}
+					return false;
+				});
+			}
+			if (f) {
+				$(".step1").find("textarea").addClass("checkerror");
+			} else {
+				$(".step1").find("textarea").parent().find(".error-tips").hide();
+				$(".step1").find("textarea").removeClass("checkerror")
+			}
+		}
+	}
+	function checkRefer() {
+		var tarea = $(".step-process-box.refer").find("textarea");
+        // 先判断是否选择了referer类型
+        var selectValue = $(".step2 .step-process-box.refer").find('.ui-dropdown font').data('val');
+        if (selectValue == 0) {
+            tarea.removeClass("checkerror");
+            return true;
+        }
+		var text = tarea.val().split(/\n/);
+		var error = [];
+		var referList = _.filter(text, function(item) {
+					if ($.trim(item) == "") {
+						return false;
+					} else if (cdnutil.testDomain(item.replace("*", "a"))
+							|| cdnutil.testIp(item)) {
+						return true;
+					} else {
+						error.push(item);
+						return false
+					}
+
+				});
+		if (error.length > 0) {
+			$("#refertips").html("*您的输入不合法，请输入域名、ip或者域名前缀通配，不带http://，一行填写一个")
+					.show();
+			tarea.addClass("checkerror");
+			return false;
+		}
+		var stype = $(".step-process-box.refer").find(".txt").attr("data-val");
+		// {'type' => 0/1/2,'list' => ['xx.com','oo.com']} op_type = 1
+		// 可取0/1/2， 分别对应 不设置/黑名单/白名单
+		if (referList.length == 0 && stype != 0) {
+			$("#refertips").html("*您的输入内容为空").show();
+			tarea.addClass("checkerror");
+			return false;
+		}
+		var null_flag = $(".step-process-box.refer").find(":checkbox")
+				.prop("checked");
+		var d = {
+			list : referList,
+			type : stype
+		};
+		if (stype == 2) {
+			d.null_flag = null_flag ? 1 : 0;
+		}
+		tarea.removeClass("checkerror");
+		return d;
+	}
+	function s2() {
+		$(".guidmain").hide();
+		var v = hostTypeValue;
+		if ($(".step2").length > 0) {
+			$(".step2").show();
+			if (v == 1)
+			{
+                $(".step2").find(".default-row").show();
+				$(".step2").find(".furl_cache").removeAttr("disabled");
+				$(".step2").find(".label").css("color", "#000000");
+			}
+			else {
+                $(".step2").find(".default-row").hide();
+				$(".step2").find(".furl_cache").attr("disabled", "disbaled").prop("checked", true);
+				$(".step2").find(".label").css("color", "#c0c0c0");
+			}
+			return;
+		} else {
+			$(".guidcontainer").after(setp2);
+            $(".step2").find(".head-row input.time").keyup(function() {
+				var allTypeV = $(this).val();
+				if (allTypeV == "") {
+					$(this).addClass("error checkerror");
+				} else {
+					$(this).removeClass("error checkerror");
+				}
+				var allTypeText4 = "FTP缓存时间设置最大值不能小于300秒，请修改后重新设置";
+				// 整型
+				if (allTypeV>0  ||  v=="0") {
+				} else {
+					$(this).val(allTypeV.replace(/(\D)/ig, ""));
+				}
+				var allType_host_type = hostTypeValue;
+				var p = $(this).parent().find("select").val();
+				var option = $(this).parent().find("select").eq(0).find("option[value="+p+"]");
+				var time2 = parseInt(Math.max(0,allTypeV)) * parseInt(p);
+				//ftp需要大于300秒
+				if(allType_host_type == 2 && time2<300){
+					$(this).addClass("error checkerror");
+					tips.error(allTypeText4)
+				}else{
+					$(this).removeClass("error checkerror");
+				}
+			});
+            // 默认配置行事件监听初始化
+            defaultItemEvent();
+			if (v == 1)
+			{
+                $(".step2").find(".default-row").show();
+				$(".step2").find(".furl_cache").removeAttr("disabled");
+				$(".step2").find(".label").css("color", "#000000");
+			}
+			else {
+                $(".step2").find(".default-row").hide();
+				$(".step2").find(".furl_cache").attr("disabled", "disbaled").prop("checked", true);
+				$(".step2").find(".label").css("color", "#c0c0c0");
+			}
+		}
+		$(".step2").find(".next").click(function() {
+					$(".step2").find(".checkitem").trigger("keyup");
+					if ($(".step2").find(".checkerror").length == 0) {
+						s3();
+					}
+				});
+		$(".step2").find(".pre").click(function() {
+					s1();
+				});
+
+        $('textarea').on('focus', function() {
+            if(this.title==this.value) {
+                this.value = '';
+            }
+        });
+
+		// refer
+		new dropdown($(".step2 .step-process-box.refer").find('.ui-dropdown'),
+				{
+					buttonObj : $(".step2 .step-process-box.refer")
+							.find('.btn-link')
+				}).click(function(li) {
+			var v = $(li).data("value");
+			if ($(".step2 .step-process-box.refer").find(".txt")
+					.attr("data-val") != v) {
+				$("#refertips").hide();
+			}
+			$(".step2 .step-process-box.refer").find(".txt").text($(li).text())
+					.attr("data-val", v);
+			if (v == 0) {
+				$(".step2 .step-process-box.refer").find(".right-refer").hide();
+			} else {
+				if (v == 2) {
+					$(".step2 .nullrefer").show();
+				} else {
+					$(".step2 .nullrefer").hide();
+				}
+				$(".step2 .step-process-box.refer").find(".right-refer").show();
+			}
+		});
+		var refertext = "";
+		$(".step2 .step-process-box.refer").find("textarea").keyup(function() {
+			var text = this.value.split(/\n/);
+			if (text.length > 200) {
+				this.value = refertext;
+			} else {
+				if ($.trim(this.value.replace(/\n/ig, ";")).indexOf(";;") > -1) {
+					// 有空格
+					$("#refertips").html("* 检测到您的输入内容中有空行，系统会自动去掉").show();
+				} else {
+					$("#refertips").hide();
+				}
+				if (text[text.length - 1] == "") {
+					var len = 200 + 1 - text.length;
+				} else {
+					var len = 200 - text.length;
+				}
+				$(".step2 .step-process-box.refer").find(".inputtips")
+						.html("您还可以输入<em>" + len + "</em>条");
+				refertext = this.value;
+				checkRefer();
+			}
+		});
+		// cache
+		$(".step2").find(".add-link a").click(function() {
+			var item = $(cachetr);
+			new dropdown(item.find('.ui-dropdown'), {
+						buttonObj : item.find('.btn-link')
+					}).click(function(li) {
+						var v = $(li).data("cdn-cachetype");
+						var input = item.find("input").eq(0);
+						var span = item.find(".wrap-placeholder");
+						var t1 = ".jpg;.png;.css"
+						var t2 = "/1234;/test;/a/b";
+						var t3 = "/index.html;/test/*.jpg;/";
+						if (v == "1") {
+							input.attr("placeholder", t1);
+							span.text(t1)
+						} else if(v == "2") {
+							input.attr("placeholder", t2);
+							span.text(t2)
+						} else if(v == "3") {
+							input.attr("placeholder", t3);
+							span.text(t3)
+						}
+						item.find("input.content").remove("style").val("");
+						item.find("[data-val]").text($(li).text()).attr(
+								"data-val", v);
+					});
+			item.find("input.time").keyup(function() {
+						var v = $(this).val();
+						if (v == "") {
+							$(this).addClass("error checkerror");
+						} else {
+							$(this).removeClass("error checkerror");
+						}
+						var text4 = "FTP缓存时间设置最大值不能小于300秒，请修改后重新设置";
+						// 整型
+						if (v>0  ||  v=="0") {
+						} else {
+							$(this).val(v.replace(/(\D)/ig, ""));
+						}
+						var host_type = hostTypeValue;
+						var p = $(this).parent().find("select").val();
+						var option = $(this).parent().find("select").eq(0).find("option[value="+p+"]");
+						var time2 = parseInt(Math.max(0,v)) * parseInt(p);
+						//ftp需要大于300秒
+						if(host_type == 2 && time2<300){
+							$(this).addClass("error checkerror");
+							tips.error(text4)
+						}else{
+							$(this).removeClass("error checkerror");
+						}
+					});
+			item.find("input.content").keyup(function() {
+						var v = $(this).val();
+						if (v.length <= 150) {
+							$(this).attr("data-val", v);
+						} else {
+							$(this).val(v.substr(0, 150));
+						}
+						var v = $(this).val().trim();
+						var p = $(this).parents("tr");
+						var selType = item.find("[data-val]").attr("data-val");
+						if (selType == "1") { // CACHE_TYPE_SUFFIX 文件类型
+							if (/^((\.[a-zA-Z0-9]{1,});)*\.[a-zA-Z0-9]{1,}$/
+									.test(v)) {
+								$(this).removeClass("error checkerror");
+							} else {
+								$(this).addClass("error checkerror");
+							}
+						} else if(selType == "2") {
+							if (v && /^(\/[^;|:\/<>*"\\]+;?)*$/.test(v)) {
+								$(this).removeClass("error checkerror");
+								$(this).val(v.replace(/[\s\uFEFF\xA0]+/g, ""));
+							} else {
+								$(this).addClass("error checkerror");
+							}
+						} else if(selType == "3") {
+							if (v && /^\/[^;|:<>"\\]*(;\/[^;|:<>"\\]*)*$/.test(v)) {
+								$(this).removeClass("error checkerror");
+							} else {
+								$(this).addClass("error checkerror");
+							}
+						}
+					}).placeholder();
+			$(".step2 .cacheTbody").append(item);
+			var len = $(".step2 .cacheTbody").find("tr").length;
+			if (len >= 10) {
+				$(this).hide();
+			}
+			item.find("[data-event=delCacheItem]").click(function() {
+						$(this).parents("tr").remove();
+						var len = $(".step2 .cacheTbody").find("tr").length;
+						if (len <= 10) {
+							$(".step2").find(".add-link a").show();
+						}
+					});
+		});
+		$(".step2").find(".ico-down-arrow").click(function() {
+					$(this).parents(".step-process-box").toggleClass("open");
+				});
+		$(".step2 [_dn_action=cancel]").click(function(){
+			router.navigate("/cdn/access");
+		});
+	}
+
+    function defaultItemEvent() {
+        var item = $('.default-row');
+		new dropdown(item.find('.ui-dropdown'), {
+					buttonObj : item.find('.btn-link')
+				}).click(function(li) {
+					var v = $(li).data("cdn-cachetype");
+					var input = item.find("input").eq(0);
+					var span = item.find(".wrap-placeholder");
+					var t1 = ".jpg;.png;.css"
+					var t2 = "/1234;/test;a/b";
+					if (v == "1") {
+						input.attr("placeholder", t1);
+						span.text(t1)
+					} else {
+						input.attr("placeholder", t2);
+						span.text(t2)
+					}
+					item.find("input.content").remove("style").val("");
+					item.find("[data-val]").text($(li).text()).attr(
+							"data-val", v);
+				});
+		item.find("input.time").keyup(function() {
+                    var sourceValue = hostTypeValue;
+                    if (sourceValue != 1) {
+                        $(this).removeClass("error checkerror");
+                        return;
+                    }
+					var v = $(this).val();
+					if (v == "") {
+						$(this).addClass("error checkerror");
+					} else {
+						$(this).removeClass("error checkerror");
+					}
+					var text4 = "FTP缓存时间设置最大值不能小于300秒，请修改后重新设置";
+					// 整型
+					if (v>0  ||  v=="0") {
+					} else {
+						$(this).val(v.replace(/(\D)/ig, ""));
+					}
+					var host_type = hostTypeValue;
+					var p = $(this).parent().find("select").val();
+					var option = $(this).parent().find("select").eq(0).find("option[value="+p+"]");
+					var time2 = parseInt(Math.max(0,v)) * parseInt(p);
+					//ftp需要大于300秒
+					if(host_type == 2 && time2<300){
+						$(this).addClass("error checkerror");
+						tips.error(text4)
+					}else{
+						$(this).removeClass("error checkerror");
+					}
+				});
+		item.find("input.content").keyup(function() {
+                    var sourceValue = hostTypeValue;
+                    if (sourceValue != 1) {
+                        $(this).removeClass("error checkerror");
+                        return;
+                    }
+					var v = $(this).val();
+					if (v.length <= 150) {
+						$(this).attr("data-val", v);
+					} else {
+						$(this).val(v.substr(0, 150));
+					}
+					var v = $(this).val().trim();
+					var p = $(this).parents("tr");
+					var selType = item.find("[data-val]").attr("data-val");
+					if (selType == "1") { // CACHE_TYPE_SUFFIX 文件类型
+						if (/^((\.[a-zA-Z0-9]{1,});)*\.[a-zA-Z0-9]{1,}$/
+								.test(v)) {
+							$(this).removeClass("error checkerror");
+						} else {
+							$(this).addClass("error checkerror");
+						}
+					} else {
+						if (v && /^(\/[^;|:\/<>*"\\]+;?)*$/.test(v)) {
+							$(this).removeClass("error checkerror");
+							$(this).val(v.replace(/[\s\uFEFF\xA0]+/g, ""));
+						} else {
+							$(this).addClass("error checkerror");
+						}
+					}
+				}).placeholder();
+        item.find("[data-event=delCacheItem]").click(function() {
+                    $(this).parents("tr").remove();
+                    var len = $(".step2 .cacheTbody").find("tr").length;
+                    if (len <= 10) {
+                        $(".step2").find(".add-link a").show();
+                    }
+                });
+	}
+
+	function s3() {
+		$(".step3").remove();
+		$(".guidmain").hide();
+		var domains = [];
+		$(".step1").find(".domaininput").each(function() {
+					if ($.trim($(this).val()) != "") {
+						domains.push($(this).val());
+					}
+				});
+		var service_type = $(".step1").find("[_dn_cdn_action='business_select'] .txt").attr("data-val");
+		var host_type = hostTypeValue;
+		var projectid= $(".step1").find(".projectselect .txt").attr("data-val");
+		var projectTxt= $(".step1").find(".projectselect .txt").text();
+		var originList = _.filter($(".step1").find("textarea").val().split(/\n/), function(item) {
+			if ($.trim(item) == "") {
+				return false;
+			}
+			return true
+		});
+		var bucketid= $(".step1").find(".bucketselect [_dn_cdn_bucket_input]").data("val");
+		var bucket_project_id = $(".step1").find(".bucketselect [_dn_cdn_bucket_input]").data("id");
+		var bucketTxt= $(".step1").find(".bucketselect [_dn_cdn_bucket_input]").val();
+		
+		var furl_cache = $(".step2").find(".furl_cache").prop("checked");
+
+		// 全部类型的时间改为可选，数据需要实时获取
+		var allTypeCache = ["0", "all"];
+		var allTypeP = $(".step2").find(".head-row select").val();
+		var allTypeOption = $(".step2").find(".head-row select").find("option[value="+allTypeP+"]");
+		var allTypeTime = $(".step2").find(".head-row input").val();
+		var allTypeTime2 = parseInt(Math.max(0, allTypeTime)) * parseInt(allTypeP);
+		allTypeCache.push(allTypeTime2);
+		allTypeCache.push(allTypeOption.data("type"));
+		var cacheList =[allTypeCache];
+		var cachetd1 =["全部类型"];
+		var cachetd2 =["所有文件"];
+		var cachetd3 =[allTypeTime + allTypeOption.text()];
+		$(".step2").find(".cacheTbody tr:gt(0)").each(function(){
+            if ($(this).hasClass('default-row') && host_type != 1)
+            {
+                return;
+            }
+			var tp = $(this).find(".txt").attr("data-val");//1是文件类型 2是文件夹
+			var content;
+			if (tp == 1) {
+				content = $(this).find("input").eq(0).val();
+			}
+			else {
+				content = $(this).find("input").eq(0).val().replace(/[\s\uFEFF\xA0]+/g, "");
+			}
+			var time= $(this).find("input").eq(1).val();
+			var p = $(this).find("select").val();
+			var option = $(this).find("select").eq(0).find("option[value="+p+"]");
+			var time2 = parseInt(Math.max(0,time)) * parseInt(p);
+			cacheList.push([tp,content,time2,option.data("type")]);
+			cachetd1.push(tp=="1"?"文件类型":"文件夹");
+			cachetd2.push(content);
+			cachetd3.push(time+""+option.text());
+		});
+		var referTxt = $(".step2 .step-process-box.refer").find("textarea").val().replace(/\n/ig,",").replace(/,+/ig,",");
+		var stype = $(".step-process-box.refer").find(".txt").attr("data-val");
+		var null_flag = $(".step-process-box.refer").find(":checkbox").prop("checked");
+		$(".guidcontainer").after(tmpl.parse(setp3, {
+			domains: domains.join(","),
+			service_type: service_type,
+			host_type:host_type,
+			projectid: projectid,
+			projectTxt: projectTxt,
+			ftpTxt: "ftp://ftp.cdn.qcloud.com/"+appid+"/"+projectid,
+			bucketid: bucketid,
+			bucketTxt: bucketTxt,
+			originList: originList.join(",").replace(/\s+/g, ""),
+			cachetd1:cachetd1,
+			cachetd2:cachetd2,
+			cachetd3:cachetd3,
+			furl_cache:furl_cache,
+			referTxt: referTxt,
+			stype:stype,
+			null_flag:null_flag
+		}));
+		 var refer= {list:referTxt.replace(/,/ig,";").split(";"),type:+stype};
+           if(stype == 2){
+            	refer.null_flag = null_flag?1:0;
+            	refer.type = 2;
+          }
+            // 规避ie下referTxt存在内容的问题
+            if (stype == 0) {
+                refer.list = [];
+            }
+
+		var host_type_en = ({
+			1: 'cname',
+			2: 'ftp',
+			3: 'cos'
+		})[host_type];
+		var service_type_en = ({
+			1: 'web',
+			2: 'download',
+			3: 'media'
+		})[service_type];
+		var data={
+			host : domains.join(";"),
+			host_type: host_type_en,
+			service_type: service_type_en,
+			project_id :projectid,
+			bucket_name: bucketid,
+			bucket_project_id: bucket_project_id,
+			origin : originList.join(";").replace(/\s+/g, ""),
+			furl_cache:furl_cache?"off":"on",
+			refer : JSON.stringify(refer),
+			cache : JSON.stringify(cacheList)
+		}
+		$(".step3").find(".next").click(function() {
+			addHost(data);
+			$(".step3").find(".next").prop('disabled', true);
+			setTimeout(function () {
+				$(".step3").find(".next").prop('disabled', false)
+			}, 3 * 1000)
+		});
+		$(".step3").find(".pre").click(function() {
+			s2();
+		});
+		$(".step3").find(".ico-down-arrow").click(function() {
+			$(this).parents(".step-process-box").toggleClass("open");
+		});
+		$(".step3 [_dn_action=cancel]").click(function(){
+			router.navigate("/cdn/access");
+		});
+	}
+	function addHost(data){
+		dao.addHost({
+			data :  data,
+			success : {
+				"0" : function(rs) {
+					rs.data.host =data.host;
+					s4(rs);
+				},
+				"default" : function(rs) {
+					s4(rs);
+					if (rs.msg) {
+						var host = rs.data.host;//[{"msg":"您输入的域名已被其他用户设置CDN加速，如有疑问请联系客服",val:"wait1.com"},{"msg":"您输入的域名已被其他用户设置CDN加速，如有疑问请联系客服",val:"wait123.com"}];
+						var refer= rs.data.refer;//{msg:"referreferreferrefer"};
+						var origin = rs.data.origin;//{msg:"originoriginoriginorigin"};
+						var t=s1;
+						if(rs.data){
+							if(refer){
+								$("#refertips").html(refer.msg).show();
+								$(".step-process-box.refer").find("textarea").addClass("checkerror");
+								t=s2;
+							}
+							//按顺序设置错误
+							if(origin){
+								$(".step1").find("textarea").parent().find(".error-tips").text(origin.msg).show();
+								t=s1;
+							}
+							if(host){
+								t=s1;
+								$(".step1").find(".domaininput").each(function() {
+									var v = $(this).val();
+									var _this =this;
+									$(host.val).each(function(idx,item){
+										if(item.val == v){
+											$(_this).parent().find(".error-tips").text(item.msg).show();
+										}
+									})
+								});
+								t=s1;
+							}
+							s4(rs,t);
+						}
+						tips.error(rs.msg);
+					} else {
+						tips.error("CDN系统正在繁忙中，请休息一下，稍后重试！");
+					}
+				}
+			}
+		});
+	}
+	function s4(rs,s){
+		$(".step4").remove();
+		$(".guidmain").hide();
+		$(".guidcontainer").after(tmpl.parse(step4, {
+			rs:rs
+		}));
+		if(rs.code != 0){
+			$(".step4").find(".back").click(function(){
+				s();
+			});
+		}
+		
+	}
+	return {
+		container : "<div class='guidcontainer'></div>",
+		render : function() {
+			s1();
+		}
+	}
+});
+/*  |xGv00|69ac17bcaa4958345579ca97447cffe8 */

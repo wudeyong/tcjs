@@ -1,0 +1,836 @@
+/**
+* @fileOverview 访问情况统计
+* @author Casta
+* @requires jQuery
+* @develop 2016-08-20
+*/
+define(function(require, exports, module) {
+    var $ = require("cdn/$");
+    var Bee = require('qccomponent');
+    var tmpl = require("cdn/lib/tmpl");
+    var dao = require('cdn/data/dao');
+    var usageTemplate = require("../../templates/visit_oversea.html.js");
+    var highchart = require("cdn/highcharts");
+    var util = require('cdn/lib/util');
+    var dateUtil = require('cdn/lib/date');
+    var tips = require('cdn/tips');
+    var cdnUtil = require('cdn/util');
+    var router = require("cdn/router");
+
+    var _titleMap = {
+        'requests'  : '请求数',
+        'ip_visits' : 'IP访问次数',
+        'cache'     : '命中率'
+    };
+
+    var _defaultDateFormat = 'YYYY-MM-DD';
+    var _defaultErrMsg = '服务器繁忙，请稍后再试';
+
+    var _areaChart;             //流量使用详情图
+
+    var _is_vip;                //存储 是否是vip
+    var _hostData;              //存储全部host信息
+    var _curHostData;           //存储当前项目下的host信息
+
+    var _data = {};
+    
+    var initPanel = function() {
+        initDateSelector();
+
+        var defer = $.Deferred();
+
+        getQueryDimensionOv().then(function(r) {
+            var qData = r.data;
+
+            //保存一下hostdata备用
+            _hostData = qData.hosts;
+            _curHostData = _hostData;
+
+            initProjects(qData.projects);
+            initHosts(qData.hosts);
+
+            emit();
+
+        });
+    }
+
+    var initDateSelector = function() {
+        var now = new Date().getTime();
+        var today = dateUtil.formatDate(now - 0, _defaultDateFormat);
+        var yesterday = dateUtil.formatDate(now - 24*3600*1000, _defaultDateFormat);
+        var recent90 = dateUtil.formatDate(now - 24*3600*1000*89, _defaultDateFormat);
+
+        var picker = Bee.mount('js-date-cont', {
+            $data: {
+                // 是否选择日历选择器
+                showCalendar: true,
+                // 使用的语言包，目前支持 'zh-cn' 和 'en-us'
+                lang: 'zh-cn',
+                // 应用单选模式
+                mode: 'single',
+                // 快捷日期选项卡
+                tabs: [
+                    { label: '今天', from: today, to: today},
+                    { label: '昨天', from: yesterday, to: yesterday }
+                ]
+            }
+        });
+        //只显示最近90天的数据
+        picker.setAllowRange(recent90, today);
+        picker.setSelectedRange(today, today);
+        picker.$on('datepick', function(selected) {
+            var from = selected.from;
+            var to = selected.to;
+            $('#js-btn-search').data('from',from);
+            $('#js-btn-search').data('to',to);
+            var gaptime = new Date(to).getTime() - new Date(from).getTime();
+            gaptime = gaptime/1000/60;//单位是分钟
+            $('#js-btn-search').data('gaptime',gaptime);
+
+            $('#js-btn-search').click();
+        });
+    }
+
+    var initProjects = function(projects) {
+        var str = tmpl.parse($("[data-cdn-tmpl=select_cdn_projects]").html(), {
+            data : projects
+        });
+        $('.js-select-projs').append(str);
+    }
+
+    var initHosts = function(hosts) {
+        var str = tmpl.parse($("[data-cdn-tmpl=select_cdn_hosts]").html(), {
+            data : hosts
+        });
+        var hostSelect = $('.js-hosts-dd-maintain').html(str);
+
+        var input = hostSelect.find("input:eq(0)");
+        input.trigger('click');
+
+        var parentPanel = $('.js-multi-select-panel'),
+            okBtn = parentPanel.find('.dialog_layer_ft .js-btn-ok');
+        if (input.length) {
+            okBtn.removeClass('btn_unclick');
+        } else {
+            okBtn.addClass('btn_unclick');
+            $('.js-multi-select').val('');
+        }
+    }
+
+    var initTables = function() {
+        // 初始化流量使用详情
+        _areaChart = initAreaChart({
+            container: $('.js-chart-area')
+        });
+    }
+
+    // 初始化流量使用详情图
+    var initAreaChart = function(opt) {
+        var cont = opt.container;
+        var type = 'requests';
+        var x,y;
+        if(type=='requests'){
+            x = {
+                dateTimeLabelFormats:{
+                    hour: '%H:%M',
+                    day: '%e日'
+                },
+                type: 'datetime'
+            };
+            y = {
+                title: {
+                    text: ''
+                    
+                },
+                labels: {
+                    formatter: function() {
+                        return this.value;
+                    }
+                }
+            };
+        }else if(type=='ip_visits'){
+            x = {
+                dateTimeLabelFormats:{
+                    hour: '%H:%M',
+                    day: '%e日'
+                },
+                type: 'datetime'
+            };
+            y = {
+                title: {
+                    text: ''
+                },
+                labels: {
+                    formatter: function() {
+                        return this.value;
+                    }
+                }
+            };
+        }else if (type == 'cache') {
+            x = {
+                dateTimeLabelFormats : {
+                    hour : '%H:%M',
+                    day : '%e日'
+                },
+                type : 'datetime'
+            };
+            y = {
+                title : {
+                    text : ''
+                },
+                labels : {
+                    formatter : function() {
+                        return this.value;
+                    }
+                },
+                max: 100
+            };
+        }
+        
+        var areaChart = $(cont).highcharts({
+            chart: {
+                type: 'area',
+                height: 370
+            },
+            credits: {
+                enabled: false//去掉logo
+            },
+            title: {
+                text: ''
+            },
+            subtitle: {
+                text: ''
+            },
+            xAxis: x,
+            yAxis: y,
+            tooltip: {
+                //pointFormat: '{series.name} produced <b>{point.y:,.0f}</b><br/>warheads in {point.x}'
+                //enabled:false
+            },
+            plotOptions: {
+                area: {
+                    // pointStart : dateUtil.getUTCDateFromStr(data.start_datetime),
+                    // pointInterval : (data.period || 5) * 60 * 1000,//默认5分钟
+                    marker: {
+                        enabled: false,
+                        symbol: 'circle',
+                        radius: 2,
+                        states: {
+                            hover: {
+                                enabled: false
+                            }
+                        }
+                    },
+                    events: {
+                        legendItemClick: function () {
+                            return false; 
+                        }
+                    }
+                }
+                
+            },
+            series: [{
+                name: '',
+                data: [
+                ]
+            }]
+        });
+        
+        return areaChart.highcharts();
+    }
+
+    /* 获取当前参数 start */
+    var getCurrParams = function(opt){
+        opt = opt || {};
+        var _default = {
+            start_date  : getCurrDate('start'),
+            end_date    : getCurrDate('end'),
+            host        : getCurrHosts(),
+            period      : getCurrPeriod(),
+            p_id        : getCurrProjects(),
+            g_tk        : cdnUtil.getACSRFToken()
+        };
+        var params = $.extend(_default, opt)
+
+        params = filterParam(params)
+
+        return params
+    }
+
+    var getCurrHosts = function(){
+        var inputs = $('.js-hosts-dd-wrap').find('input');
+        var checkedInputs = $('.js-dl-hosts').find('input:checked');
+        var allChecked = $('#domain-check-all').is(':checked');
+        var res = '';
+        if(allChecked && !$('.js-hosts-search').val()){//全选传空字符串
+            return res;
+        }
+
+        //没有选中等于全选
+
+        for(var i=0;i<checkedInputs.length;i++){
+            res += $(checkedInputs[i]).val();
+            if(i==checkedInputs.length-1){
+                break;
+            }
+            res += ',';
+        }
+        return res;
+    }
+    
+    
+    var getCurrProjects = function(){
+        var inputs = $('.js-select-projs').find('option:selected');
+        var res = '';
+        res = inputs.val();
+        if (undefined == res || null == res) {
+            return "";
+        }
+        return res;
+    }
+    
+    var getCurrDate = function(type){
+        var res;
+        var startDate,endDate;
+        
+        startDate = $('#js-btn-search').data('from');
+        endDate = $('#js-btn-search').data('to');
+        
+        if(type=='start'){
+            res = startDate;
+        }else if(type=='end'){
+            res = endDate;
+        }
+        
+        res = res || dateUtil.formatDate(new Date(),_defaultDateFormat);
+        
+        return res;
+    }
+    
+    var getCurrPeriod = function(){
+        var input = $('.js-select-period').find('option:selected');
+        var res = '';
+        if(input.length==0){
+            input = $('.js-select-period').find('option:first');
+        }
+        res = input.attr('value');
+        if (undefined == res || null == res) {
+            return "";
+        }
+        return res;
+    }
+
+    var getCurrStatType = function() {
+        return $('.js-top-chart .checked').data('type')
+    }
+    /* 获取当前参数 end */
+
+    var initEvent = function() {
+
+        //tab点击事件
+        $('.js-top-chart .tc-15-btn').click(function(){
+            
+            var self = $(this);
+            self.addClass('checked');
+            self.siblings().removeClass('checked');
+
+            renderTime(_data);
+            renderOther(_data);
+            
+            return false;
+        });
+
+        // 项目与域名进行联动
+        $('.js-select-projs').change(function(){
+            var pid = $(this).val(),
+                hostSelect = $('.js-hosts-dd-maintain');
+
+            // 全部项目
+            if (pid === '') {
+                _curHostData = _hostData;
+            } else {
+
+                // 其他项目按照匹配放入_curHostData中
+                var res = {}
+                for (var hid in _hostData) {
+                    var ref = _hostData[hid];
+
+                    // 匹配则放在_curHostData中
+                    if (ref.p_id === Number(pid)) {
+                        res[hid] = ref;
+                    }
+                }
+                _curHostData = res;
+            }
+
+            var str = tmpl.parse($("[data-cdn-tmpl=select_cdn_hosts]").html(), {
+                data : _curHostData
+            });
+            hostSelect.html(str);
+            $('.js-hosts-search').val('');
+
+            var input = hostSelect.find("input:eq(0)");
+            input.trigger('click');
+
+            var parentPanel = $('.js-multi-select-panel'),
+                okBtn = parentPanel.find('.dialog_layer_ft .js-btn-ok');
+            if (input.length) {
+                okBtn.removeClass('btn_unclick');
+            } else {
+                okBtn.addClass('btn_unclick');
+                $('.js-multi-select').val('');
+            }
+
+        });
+
+        // 域名搜索框
+        $('.js-multi-select-panel').on('input propertychange', '.js-hosts-search', function() {
+            var host = $(this).val();
+            var hostSelect = $('.js-hosts-dd-maintain');
+            var searchReg = host;
+
+            var res;
+
+            if (host !== '') {
+                res = {};
+                $.each(_curHostData, function(host, hostValue) {
+                    if (host.indexOf(searchReg) > -1) {
+                        res[host] = {
+                            name: hostValue.name,
+                            p_id: hostValue.p_id
+                        }
+                    }
+                });
+            } else {
+                res = _curHostData;
+            }
+
+            var str = tmpl.parse($("[data-cdn-tmpl=select_cdn_hosts]").html(), {
+                data : res
+            });
+            hostSelect.html(str);
+
+            var input = hostSelect.find("input:eq(0)");
+            input.trigger('click');
+
+            var parentPanel = $('.js-multi-select-panel'),
+                okBtn = parentPanel.find('.dialog_layer_ft .js-btn-ok');
+            if (input.length) {
+                okBtn.removeClass('btn_unclick');
+            } else {
+                okBtn.addClass('btn_unclick');
+                $('.js-multi-select').val('');
+            }
+        })
+
+        //点击搜索
+        $('#js-btn-search').click(function(){
+
+            getVisitStatDataOv_curry('time')(function(resData) {
+                _data.start_datetime = resData.start_datetime;
+                _data.end_datetime = resData.end_datetime;
+                _data.period = resData.period;
+                _data.flux = resData.flux;
+                _data.bandwidth = resData.bandwidth;
+                _data.bandwidth95 = resData.bandwidth95;
+                _data.time_data = resData.time_data;
+                renderTime(_data);
+            })
+
+            renderOther();
+
+            return false;
+        });
+
+        $('.js-multi-select').click(function(e){
+            var self = $(this);
+            
+            var panel = self.siblings('.js-multi-select-panel');
+            
+            panel.toggle();
+            panel.css({
+                left:self.position().left
+            })
+            return false;
+        });
+
+        // 选择标签事件
+        $('.js-multi-select-panel').on('click', 'input[type=radio], label', function(e) {
+            e = e || window.event;
+            var input = $(this).parents('.js-hosts-dd-wrap').find("input"),
+                res;
+            input.prop("checked", true);
+            res = setInputVal(input, "name");
+            $('.js-input-hostname').val(res);
+            e.stopPropagation();
+        });
+
+
+        // 多选对话框关闭
+        $('.js-usage-main-wrap').on('click', function(e){
+            $('.js-multi-select-panel').hide();
+        });
+
+        // 防止上面的点击事件 相关的隐藏回调 在多选区域点击时触发
+        $('.js-usage-main-wrap').on('click', '.js-multi-select-panel', function(e){
+            return false;
+        });
+
+        $('.js-usage-main-wrap').on('click', '.js-btn-ok:not(.btn_unclick), .js-btn-cancel', function(e){
+           $('.js-multi-select-panel').hide(); 
+        });
+
+        //下载趋势详情
+        $('.js-usage-main-wrap').on('click','.js-download-trenddata', function(e){
+            downloadVisitStatDataOv({view: 'time'});
+        });
+    }
+
+    /* 渲染图表 start */
+
+    // 图和表填充数据
+    var renderOther = function(d) {
+
+    }
+
+
+    var renderTime = function(d) {
+        var stat_type = getCurrStatType();
+
+        //更新区域图
+        updateAreaChart(d, stat_type);
+    };
+
+    //更新使用详情图
+    var updateAreaChart = function(opt, stat_type){
+        var type = stat_type;
+        var name = _titleMap[type];
+        var resData = opt.time_data[type] || [];
+
+        if(type=='requests' || type=='ip_visits'){
+
+            _areaChart.options.tooltip.formatter = function(argument) {
+                return '<b>日期:'
+                        + Highcharts.dateFormat('%Y-%m-%e %H:%M:%S', this.x)
+                        + '</b>' + '<br/>' + '<b>' + name + ':' + this.y + "次"
+                        + '</b>';
+            };
+            $('.js-areachart-unit').text('（' + name + '：' + "次" + '）');
+
+            // 改变Y轴最大值为100
+            _areaChart.yAxis[0].options.max = null;
+
+        } else {
+            _areaChart.options.tooltip.formatter = function() {
+                var res = this.y;
+                if (res != 0) {
+                    res = res.toFixed(2) + "%"
+                }
+                return '<b>日期:'
+                        + Highcharts.dateFormat('%Y-%m-%e %H:%M:%S', this.x)
+                        + '</b>' + '<br/>' + '<b>' + name + ':' + res + '</b>';
+            };
+            $('.js-areachart-unit').text('（' + name + '：%' +'）');
+
+            // 改变Y轴最大值为100
+            _areaChart.yAxis[0].options.max = 100;
+
+        }
+        
+        var period = opt.period || 5;
+        var tickInterval = 3600*1000;
+        if(period>=60){
+            tickInterval = 24*3600*1000;
+            _areaChart.xAxis[0].options.labels.formatter = function(){
+                return Highcharts.dateFormat('%Y-%m-%e %H:%M:%S', this.value);
+            }
+        }
+        
+        //动态改变x轴间隔
+        _areaChart.xAxis[0].options.tickInterval = tickInterval;
+        
+        _areaChart.series[0].update({
+            data            : resData,
+            name            : name,
+            pointStart      : dateUtil.getUTCDateFromStr(opt.start_datetime),
+            pointInterval   : (period)*60*1000//默认5分钟
+        });
+        
+        if(resData.length==0){
+            _areaChart.hideNoData();
+            _areaChart.showNoData("暂无数据");
+        }
+    }
+
+
+    /* 渲染图表 end   */
+
+    /* 接口调用 start */
+
+    var getQueryDimensionOv = function(opt){
+        var param = {};
+
+        var defer = $.Deferred();
+
+        dao.getQueryDimensionOv({
+            data    : param,
+            success : function(d){
+                defer.resolve(d);
+            },
+            error   : function(d){
+                d = d || {};
+                tips.error(d.errmsg || d.msg || _defaultErrMsg);
+                defer.reject(d);
+            }
+        });
+
+        return defer.promise();
+    }
+
+    // 获取某类型统计的数据
+    var getVisitStatDataOv = function(opt){
+        var param = getCurrParams(opt);
+
+        var defer = $.Deferred();
+
+        if (!param.host) {
+            tips.error("请选择有效的域名");
+            defer.reject({});
+            return defer.promise();
+        }
+        dao.getVisitStatDataOv({
+            data    : param,
+            success : function(d) {
+                defer.resolve(d);
+            },
+            error   : function(d){
+                d = d || {};
+                tips.error(d.errmsg || d.msg || _defaultErrMsg);
+                defer.reject(d)
+            }
+        });
+
+        return defer.promise();
+    }
+
+    // 下载某类型统计的数据
+    var downloadVisitStatDataOv = function(opt){
+        var url = CDN.FormSender.serverUrl + CDN.FormSender.commonPath + 'action=download_visit_stat_data_ov'
+        var param = getCurrParams(opt);
+
+        var temp_form = document.createElement("form");
+        temp_form.action = url;
+        temp_form.target = "_blank";
+        temp_form.method = "post";
+        temp_form.style.display = "none";
+        for (var x in param) {      
+            var opt = document.createElement("textarea");      
+            opt.name = x;      
+            opt.value = param[x];      
+            temp_form .appendChild(opt);      
+        }
+        document.body.appendChild(temp_form);
+        temp_form.submit();
+    }
+
+    /* 接口调用 end   */
+
+    /* 辅助函数 start */
+
+    //根据制定的单位更新数据
+    var fixAreaChartData = function(data, rate){
+        var res = [];
+        for(var i=0;i<data.length;i++){
+            if(data[i] !== null) {
+                res.push(data[i]/rate);
+            }else{
+                res.push(null)
+            }
+        }
+        return res;
+    }
+
+    // 获取某类型统计的数据，柯里化
+    var getVisitStatDataOv_curry = function(view) {
+
+        return function(fn) {
+            getVisitStatDataOv({view: view}).then(function(res) {
+                if(res.code==0) {
+                    resData = res.data;
+
+                    fn(resData)
+                }else{
+                    // url中存在hosts参数且后台返回9105则去掉参数
+                    if (res.code == 9105 && paramHost)
+                    {
+                        router.navigate("/cdn/statistics/usage");
+                    }
+                    else {
+                        tips.error(res.msg || _defaultErrMsg);
+                    }
+                }
+            })
+        }
+    }
+
+    // 过滤参数
+    var filterParam = function(param) {
+        $.each(param, function(k, v) {
+            if(v === '') {
+                delete param[k]
+            }
+        })
+
+        return param
+    }
+
+    //获取合适的单位
+    var getProperUnit = function(num, suffix, optRate, unit) {
+        var res, rate, str;
+        num = num * 1;
+        
+        if(!unit){
+            unit = 'Byte';//默认单位
+        }else{
+            if(unit=='Byte'){
+                res = num;
+            }else if(unit=='KB'){
+                rate = 1000;
+                res = util.formatNumber(num/1000, 2 , ',');
+            }else if(unit=='MB'){
+                rate = Math.pow(1000,2);
+                res = util.formatNumber(num/rate, 2 , ',');
+            }else if(unit=='GB'){
+                rate = Math.pow(1000,3);
+                res = util.formatNumber(num/rate, 2 , ',');
+            }else if(unit=='TB'){
+                rate = Math.pow(1000,4);
+                res = util.formatNumber(num/rate, 2 , ',');
+            }
+            /*else if(unit=='PB'){
+                rate = Math.pow(1000,5);
+                res = util.formatNumber(num/rate, 2 , ',');
+            }*/
+            str = res + unit;
+            return {
+                num : res,
+                unit: unit,
+                str : str,
+                ori : num,
+                rate: rate  
+            } 
+        }
+        
+        if(optRate){
+            rate = optRate;
+            res = util.formatNumber(num/rate, 2 , ',');
+            str = res + unit;
+            return {
+                num : res,
+                unit: unit,
+                str : str,
+                ori : num,
+                rate: rate  
+            } 
+        }
+        
+        
+        if(num<=Math.pow(1000,2)){//此时用KB
+            res = util.formatNumber(num/1000, 2 , ',');
+            unit = 'KB';
+            rate = 1000;
+            str = res + unit;
+            
+        }else if(num<=Math.pow(1000,3)){//MB
+            rate = Math.pow(1000,2);
+            res = util.formatNumber(num/rate, 2 , ',');
+            unit = 'MB';
+            str = res + unit;
+            
+        }else if(num<=Math.pow(1000,4)){//GB
+            rate = Math.pow(1000,3);
+            res = util.formatNumber(num/rate, 2 , ',');
+            unit = 'GB';
+            str = res + unit;
+        }else if(num<=Math.pow(1000,5)){//TB
+            rate = Math.pow(1000,4);
+            res = util.formatNumber(num/rate, 2 , ',');
+            unit = 'TB';
+            str = res + unit;
+        }else{//TB
+            rate = Math.pow(1000,4);
+            res = util.formatNumber(num/rate, 2 , ',');
+            unit = 'TB';
+            str = res + unit;
+        }
+        /*else if(num<=Math.pow(1000,6)){//PB
+            rate = Math.pow(1000,5);
+            res = util.formatNumber(num/rate, 2 , ',');
+            unit = 'PB';
+            str = res + unit;
+        }*/
+        
+        //suffix..带宽的话默认是Kbps
+        if(suffix){
+            unit = unit.replace('B',suffix);
+            str = str.replace('B',suffix);
+        }
+        
+        return {
+            num : res,
+            unit: unit,
+            str : str,
+            ori : num,
+            rate: rate  
+        }
+    }
+
+    //根据选择的元素设置input的值
+    var setInputVal = function(checks, key){
+        var res = '';
+        if(!checks || checks.length==0){
+            return;
+        }
+        for(var i=0;i<checks.length;i++){
+            res += $(checks[i]).data(key) || '';
+            if(!res){
+                continue;
+            }
+            res +=';'
+        }
+        return res;
+    }
+
+
+    /* 辅助函数 end  */
+
+    var emit = function() {
+        var type = util.getParameter('stat_type') || 'requests';            
+        var paramHost = util.getParameter('hosts');
+
+        //处理下tab选中态
+        $('.js-top-chart .tc-15-btn').removeClass('checked');
+        $('.js-top-chart button[data-type='+type+']').addClass('checked');
+
+        if(paramHost) {
+            $('.js-multi-select-panel .mini_cont .js-dl-hosts').parents('.js-multi-select-panel').find('input').prop('checked', false);
+            $('.js-multi-select-panel .mini_cont .js-dl-hosts input[data-name="'+ paramHost + "\"]").trigger('click');
+        }
+
+        $('#js-btn-search').click();
+    }
+    
+    return{
+        container: usageTemplate,
+        render: function(){
+
+            initPanel();
+
+            initTables();
+
+            initEvent();
+
+        }
+    }
+});
+/*  |xGv00|9d4bd1d825f7ab1db95508dc508efa04 */
